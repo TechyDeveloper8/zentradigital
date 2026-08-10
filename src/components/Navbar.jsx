@@ -122,7 +122,6 @@ export default function Navbar({ onOpenProjectModal }) {
             onClick={onOpenProjectModal}
             className="btn-primary"
             style={{ fontSize: '0.88rem', padding: '0.65rem 1.4rem' }}
-            data-cursor="PROJECT"
           >
             <span>Start a Project</span>
             <ArrowUpRight size={16} />

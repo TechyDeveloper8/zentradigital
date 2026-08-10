@@ -122,7 +122,6 @@ export default function CaseStudies({ onOpenProjectModal }) {
                 cursor: 'pointer',
                 transition: 'all 0.2s ease',
               }}
-              data-cursor="FILTER"
             >
               {cat}
             </button>
@@ -147,7 +146,6 @@ export default function CaseStudies({ onOpenProjectModal }) {
                 transition: 'all 0.3s ease',
               }}
               className="minimal-card"
-              data-cursor="CASE STUDY"
             >
               {/* Large Image Frame */}
               <div

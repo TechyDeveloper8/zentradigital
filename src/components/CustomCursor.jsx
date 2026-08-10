@@ -3,19 +3,16 @@ import React, { useEffect, useState } from 'react';
 export default function CustomCursor() {
   const [position, setPosition] = useState({ x: -100, y: -100 });
   const [isHovered, setIsHovered] = useState(false);
-  const [cursorText, setCursorText] = useState('');
 
   useEffect(() => {
     const handleMouseMove = (e) => {
       setPosition({ x: e.clientX, y: e.clientY });
 
-      const target = e.target.closest('[data-cursor]');
+      const target = e.target.closest('a, button, input, textarea, [data-cursor], .minimal-card');
       if (target) {
         setIsHovered(true);
-        setCursorText(target.getAttribute('data-cursor') || '');
       } else {
         setIsHovered(false);
-        setCursorText('');
       }
     };
 
@@ -35,34 +32,16 @@ export default function CustomCursor() {
         style={{
           left: `${position.x}px`,
           top: `${position.y}px`,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
+          pointerEvents: 'none',
         }}
-      >
-        {isHovered && cursorText && (
-          <span
-            style={{
-              fontSize: '0.58rem',
-              fontFamily: 'var(--font-mono)',
-              fontWeight: 800,
-              color: '#0052FF',
-              letterSpacing: '0.1em',
-              textTransform: 'uppercase',
-              pointerEvents: 'none',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {cursorText}
-          </span>
-        )}
-      </div>
+      />
 
       <div
         className="custom-cursor-dot"
         style={{
           left: `${position.x}px`,
           top: `${position.y}px`,
+          pointerEvents: 'none',
         }}
       />
     </>

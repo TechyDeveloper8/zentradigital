@@ -98,7 +98,6 @@ export default function WhyZentra() {
                   position: 'relative',
                   borderTop: '3px solid #E00000',
                 }}
-                data-cursor="CONCEPT"
               >
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>

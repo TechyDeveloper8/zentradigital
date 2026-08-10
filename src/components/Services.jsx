@@ -74,7 +74,6 @@ export default function Services({ onOpenProjectModal }) {
                   gap: '1.25rem',
                   backgroundColor: isHovered ? '#F8F8F8' : '#FFFFFF',
                 }}
-                data-cursor="SERVICE"
               >
                 {/* Thin Red Expand Line */}
                 <div

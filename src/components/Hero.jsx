@@ -73,7 +73,6 @@ export default function Hero({ onOpenProjectModal }) {
               onClick={onOpenProjectModal}
               className="btn-primary"
               style={{ padding: '1rem 2.2rem', fontSize: '1rem' }}
-              data-cursor="PROJECT"
             >
               <span>Start a Project</span>
               <ArrowRight size={18} />
@@ -83,7 +82,6 @@ export default function Hero({ onOpenProjectModal }) {
               href="#work"
               className="btn-secondary"
               style={{ padding: '1rem 2.2rem', fontSize: '1rem' }}
-              data-cursor="WORK"
             >
               <span>View Our Work</span>
               <ArrowDownRight size={18} />

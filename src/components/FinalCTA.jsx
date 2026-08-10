@@ -73,7 +73,6 @@ export default function FinalCTA({ onOpenProjectModal }) {
             onClick={onOpenProjectModal}
             className="btn-primary"
             style={{ padding: '1.1rem 2.6rem', fontSize: '1.05rem' }}
-            data-cursor="PROJECT"
           >
             <span>Start a Project</span>
             <ArrowRight size={18} />

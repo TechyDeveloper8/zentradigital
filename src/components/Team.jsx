@@ -85,7 +85,6 @@ export default function Team() {
                 justifyContent: 'space-between',
               }}
               className="minimal-card"
-              data-cursor="MEMBER"
             >
               <div>
                 {/* Large Editorial Portrait Frame */}

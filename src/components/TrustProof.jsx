@@ -85,7 +85,6 @@ export default function TrustProof() {
                 transition: 'all 0.25 ease',
               }}
               className="minimal-card"
-              data-cursor="CLIENT"
             >
               <span
                 style={{
