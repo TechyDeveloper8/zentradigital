@@ -49,9 +49,9 @@ export default function DigitalBox3D() {
     rimLight.position.set(-8, -4, -4);
     scene.add(rimLight);
 
-    // Interior Red Light (grows as lid opens)
-    const boxInteriorLight = new THREE.PointLight(0xE00000, 0, 10);
-    boxInteriorLight.position.set(2.2, 0.2, 0);
+    // Interior Red Light (grows during energy buildup & opening)
+    const boxInteriorLight = new THREE.PointLight(0xE00000, 0, 12);
+    boxInteriorLight.position.set(2.3, 0.2, 0);
     scene.add(boxInteriorLight);
 
     // 5. Main Right-Aligned Box Group
@@ -63,8 +63,10 @@ export default function DigitalBox3D() {
       boxGroup.position.set(0.6, 0.2, -1.8);
       boxGroup.scale.set(0.68, 0.68, 0.68);
     }
-    boxGroup.rotation.y = -Math.PI * 0.18; // Angled front-side view
-    boxGroup.rotation.x = Math.PI * 0.06;
+    const defaultRotY = -Math.PI * 0.18;
+    const defaultRotX = Math.PI * 0.06;
+    boxGroup.rotation.y = defaultRotY;
+    boxGroup.rotation.x = defaultRotX;
     scene.add(boxGroup);
 
     // Materials
@@ -109,7 +111,7 @@ export default function DigitalBox3D() {
     interiorFloor.position.y = -0.01;
     boxGroup.add(interiorFloor);
 
-    // Red LED Trim seam around base lip
+    // Red LED Trim seam around lip
     const trimGeo = new THREE.BoxGeometry(1.94, 0.04, 1.34);
     const trimMesh = new THREE.Mesh(trimGeo, redAccentMat);
     trimMesh.position.y = 0.01;
@@ -117,11 +119,11 @@ export default function DigitalBox3D() {
 
     // --- B. HINGED TOP LID ---
     const lidPivot = new THREE.Group();
-    lidPivot.position.set(0, 0.01, -0.65); // Hinge line at back
+    lidPivot.position.set(0, 0.01, -0.65); // Hinge line at rear
     boxGroup.add(lidPivot);
 
     const lidGeo = new THREE.BoxGeometry(1.92, 0.12, 1.32);
-    lidGeo.translate(0, 0.06, 0.66); // Offset center to hinge
+    lidGeo.translate(0, 0.06, 0.66); // Offset center to hinge line
     const lidMesh = new THREE.Mesh(lidGeo, blackMat);
     lidMesh.castShadow = true;
     lidPivot.add(lidMesh);
@@ -138,11 +140,10 @@ export default function DigitalBox3D() {
     const brandBadge = new THREE.Mesh(brandBadgeGeo, redAccentMat);
     lidPivot.add(brandBadge);
 
-    // --- C. PROCEDURAL 13 3D DIGITAL ICONS ---
+    // --- C. 13 PROCEDURAL 3D ECOSYSTEM ICONS ---
     const iconsGroup = new THREE.Group();
     boxGroup.add(iconsGroup);
 
-    // Helper to create rounded 3D box shapes
     const createBeveledBox = (w, h, d, colorHex) => {
       const geo = new THREE.BoxGeometry(w, h, d);
       const mat = new THREE.MeshStandardMaterial({
@@ -155,7 +156,6 @@ export default function DigitalBox3D() {
       return mesh;
     };
 
-    // Definitions of the 13 Ecosystem 3D Icons
     const iconDataList = [
       { name: 'Instagram', color: 0x0A0A0A, target: new THREE.Vector3(-1.8, 1.8, 0.8), rot: new THREE.Vector3(0.4, 0.6, 0) },
       { name: 'Facebook', color: 0x1A1A1A, target: new THREE.Vector3(1.6, 2.2, 0.4), rot: new THREE.Vector3(-0.3, -0.5, 0.2) },
@@ -175,27 +175,22 @@ export default function DigitalBox3D() {
     const iconMeshes = [];
 
     iconDataList.forEach((data, index) => {
-      if (isMobile && index >= 7) return; // Optimize for mobile
+      if (isMobile && index >= 7) return;
 
       const iconGroup = new THREE.Group();
-
-      // Main 3D Beveled Body Block
       const body = createBeveledBox(0.42, 0.42, 0.14, data.color);
       iconGroup.add(body);
 
-      // Red Accent Ring on front face
       const ringGeo = new THREE.TorusGeometry(0.13, 0.02, 12, 24);
       const ringMesh = new THREE.Mesh(ringGeo, redAccentMat);
       ringMesh.position.z = 0.08;
       iconGroup.add(ringMesh);
 
-      // White Center Emblem Dot/Detail
       const centerDotGeo = new THREE.SphereGeometry(0.04, 16, 16);
       const centerDot = new THREE.Mesh(centerDotGeo, whiteMat);
       centerDot.position.z = 0.08;
       iconGroup.add(centerDot);
 
-      // Initial state inside box (scale 0)
       iconGroup.position.set(0, -0.2, 0);
       iconGroup.scale.set(0.001, 0.001, 0.001);
 
@@ -208,16 +203,16 @@ export default function DigitalBox3D() {
       });
     });
 
-    // --- D. SCROLL INTERACTION LOGIC ---
-    let scrollProgress = 0;
+    // --- D. MOUSE PARALLAX TRACKING ---
+    let mouseX = 0;
+    let mouseY = 0;
 
-    const handleScroll = () => {
-      const scrollY = window.scrollY;
-      const heroHeight = window.innerHeight * 1.2 || 1;
-      scrollProgress = Math.min(Math.max(scrollY / heroHeight, 0), 1);
+    const handleMouseMove = (e) => {
+      mouseX = (e.clientX / window.innerWidth - 0.5) * 0.3;
+      mouseY = (e.clientY / window.innerHeight - 0.5) * 0.3;
     };
 
-    window.addEventListener('scroll', handleScroll);
+    window.addEventListener('mousemove', handleMouseMove);
 
     const handleResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
@@ -235,55 +230,113 @@ export default function DigitalBox3D() {
 
     window.addEventListener('resize', handleResize);
 
-    // --- E. ANIMATION RENDER LOOP ---
+    // --- E. AUTONOMOUS 12-SECOND LOOP RENDER ENGINE ---
     let animId;
     const clock = new THREE.Clock();
+    const LOOP_DURATION = 12.0; // 12 seconds total loop
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const elapsedTime = clock.getElapsedTime();
+      const loopTime = elapsedTime % LOOP_DURATION;
 
-      // Stage 1: Closed -> Opening (0 to 0.3)
-      const openProgress = Math.min(Math.max(scrollProgress / 0.35, 0), 1);
-      // Smooth cubic opening curve
-      const lidAngle = -Math.pow(openProgress, 2) * (Math.PI * 0.65);
+      // Stage Calculation:
+      // 0.0 - 2.0s: Closed box resting
+      // 2.0 - 3.0s: Energy buildup (micro vibration + red glow)
+      // 3.0 - 4.0s: Box opens naturally
+      // 4.0 - 6.0s: Icons launch out
+      // 6.0 - 9.0s: Icons float gently in space
+      // 9.0 - 11.0s: Icons pull back into box
+      // 11.0 - 12.0s: Box closes smoothly
+
+      let lidAngle = 0;
+      let glowIntensity = 0;
+      let vibrationY = 0;
+
+      if (loopTime < 2.0) {
+        // Stage 1: Closed
+        lidAngle = 0;
+        glowIntensity = 0.2;
+      } else if (loopTime < 3.0) {
+        // Stage 2: Energy Buildup
+        const t = loopTime - 2.0; // 0 to 1
+        glowIntensity = 0.2 + t * 2.5;
+        vibrationY = Math.sin(t * 50) * 0.015;
+      } else if (loopTime < 4.0) {
+        // Stage 3: Box Opens
+        const t = loopTime - 3.0; // 0 to 1
+        const easeT = Math.pow(t, 2);
+        lidAngle = -easeT * (Math.PI * 0.65); // Open ~120 degrees
+        glowIntensity = 2.7 + t * 2.0;
+      } else if (loopTime < 9.0) {
+        // Stage 4 & 5: Open & Floating
+        lidAngle = -Math.PI * 0.65;
+        glowIntensity = 4.7 + Math.sin(loopTime * 3) * 0.5;
+      } else if (loopTime < 11.0) {
+        // Stage 6: Icons Pulling Back
+        lidAngle = -Math.PI * 0.65;
+        glowIntensity = 4.7 * (1 - (loopTime - 9.0) / 2.0);
+      } else {
+        // Stage 7: Box Closes
+        const t = (loopTime - 11.0) / 1.0; // 0 to 1
+        lidAngle = -Math.PI * 0.65 * (1 - Math.pow(t, 2));
+        glowIntensity = 0.2;
+      }
+
+      // Apply lid angle & internal glow
       lidPivot.rotation.x = lidAngle;
+      boxInteriorLight.intensity = glowIntensity;
 
-      // Internal light intensifies as lid opens
-      boxInteriorLight.intensity = openProgress * 4.5;
-
-      // Stage 2 & 3: Icons Launch & Spread (0.25 to 0.85)
-      const launchProgress = Math.min(Math.max((scrollProgress - 0.2) / 0.6, 0), 1);
-
+      // Icon Launch / Floating / Pull Back positions
       iconMeshes.forEach((item, i) => {
-        // Staggered launch delay per icon
-        const delay = (i / iconMeshes.length) * 0.25;
-        const iconProg = Math.min(Math.max((launchProgress - delay) / (1 - delay), 0), 1);
+        let iconProg = 0; // 0 (inside) to 1 (fully launched floating)
 
-        // Smooth parabolic trajectory out of box
+        if (loopTime < 4.0) {
+          iconProg = 0;
+        } else if (loopTime < 6.0) {
+          // Launch phase (4.0s - 6.0s)
+          const delay = (i / iconMeshes.length) * 0.4;
+          const launchTime = loopTime - 4.0;
+          iconProg = Math.min(Math.max((launchTime - delay) / (2.0 - delay), 0), 1);
+          // Ease out curve
+          iconProg = Math.sin(iconProg * Math.PI * 0.5);
+        } else if (loopTime < 9.0) {
+          // Floating phase (6.0s - 9.0s)
+          iconProg = 1;
+        } else if (loopTime < 11.0) {
+          // Pull-back phase (9.0s - 11.0s)
+          const returnTime = (loopTime - 9.0) / 2.0; // 0 to 1
+          iconProg = 1 - Math.pow(returnTime, 2);
+        } else {
+          iconProg = 0;
+        }
+
+        // Parabolic launch trajectory + floating motion
+        const floatY = loopTime >= 4.0 ? Math.sin(elapsedTime * 1.5 + i) * 0.08 : 0;
         const currentX = THREE.MathUtils.lerp(0, item.targetPos.x, iconProg);
-        const currentY = THREE.MathUtils.lerp(-0.2, item.targetPos.y + Math.sin(iconProg * Math.PI) * 0.4, iconProg);
+        const currentY = THREE.MathUtils.lerp(-0.2, item.targetPos.y + Math.sin(iconProg * Math.PI) * 0.35 + floatY, iconProg);
         const currentZ = THREE.MathUtils.lerp(0, item.targetPos.z, iconProg);
 
         item.group.position.set(currentX, currentY, currentZ);
 
-        // Scale swell
-        const scaleVal = item.initialScale * Math.sin(iconProg * Math.PI * 0.5);
+        // Scale swell & shrink
+        const scaleVal = item.initialScale * iconProg;
         item.group.scale.set(
-          Math.max(scaleVal, 0.001),
-          Math.max(scaleVal, 0.001),
-          Math.max(scaleVal, 0.001)
+          Math.max(scaleVal, 0.0001),
+          Math.max(scaleVal, 0.0001),
+          Math.max(scaleVal, 0.0001)
         );
 
-        // Rotation float
-        item.group.rotation.x = item.targetRot.x * iconProg + Math.sin(elapsedTime + i) * 0.15;
-        item.group.rotation.y = item.targetRot.y * iconProg + Math.cos(elapsedTime * 0.8 + i) * 0.2;
+        // 3D rotation float
+        item.group.rotation.x = item.targetRot.x * iconProg + Math.sin(elapsedTime + i) * 0.12;
+        item.group.rotation.y = item.targetRot.y * iconProg + Math.cos(elapsedTime * 0.8 + i) * 0.15;
         item.group.rotation.z = item.targetRot.z * iconProg;
       });
 
-      // Subtle Box Group idle hover & scroll rotation
-      boxGroup.rotation.y = -Math.PI * 0.18 + Math.sin(elapsedTime * 0.5) * 0.04 + scrollProgress * 0.3;
-      camera.position.z = 7.8 - scrollProgress * 0.8;
+      // Apply subtle mouse parallax tracking to box group
+      boxGroup.rotation.y = defaultRotY + (mouseX - boxGroup.rotation.y) * 0.04;
+      boxGroup.rotation.x = defaultRotX + (-mouseY - boxGroup.rotation.x) * 0.04;
+      boxGroup.position.y = (window.innerWidth > 900 ? -0.4 : 0.2) + vibrationY;
 
       renderer.render(scene, camera);
     };
@@ -292,7 +345,7 @@ export default function DigitalBox3D() {
 
     return () => {
       cancelAnimationFrame(animId);
-      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('resize', handleResize);
       if (container && renderer.domElement) {
         container.removeChild(renderer.domElement);
