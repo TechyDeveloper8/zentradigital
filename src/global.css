@@ -1,0 +1,232 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+:root {
+  /* Minimal Corporate Palette: White / Black / Deep Red */
+  --bg-white: #FFFFFF;
+  --bg-black: #0A0A0A;
+  --bg-subtle: #F8F8F8;
+  
+  --accent-red: #E00000;
+  --accent-red-hover: #B80000;
+  
+  --text-black: #0A0A0A;
+  --text-white: #FFFFFF;
+  --text-muted: #555555;
+  --text-dim: #888888;
+  
+  --border-subtle: #E5E5E5;
+  --border-dark: #0A0A0A;
+  
+  /* Corporate High-End Typography (Apple / Stripe / McKinsey Style) */
+  --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'IBM Plex Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  background-color: var(--bg-white);
+  color: var(--text-black);
+  font-family: var(--font-body);
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Selection */
+::selection {
+  background-color: var(--accent-red);
+  color: #FFFFFF;
+}
+
+/* Corporate Minimal Cards */
+.minimal-card {
+  background: var(--bg-white);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.minimal-card:hover {
+  border-color: var(--border-dark);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+}
+
+/* Headlines */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  letter-spacing: -0.03em;
+}
+
+/* Buttons — High Contrast Corporate Style */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.9rem 2.2rem;
+  background: var(--accent-red);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 9999px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  text-decoration: none;
+  min-height: 48px;
+}
+
+.btn-primary:hover {
+  background: var(--accent-red-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 25px -5px rgba(224, 0, 0, 0.35);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.9rem 2.2rem;
+  background: #FFFFFF;
+  color: var(--text-black);
+  border: 1px solid var(--border-dark);
+  border-radius: 9999px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  text-decoration: none;
+  min-height: 48px;
+}
+
+.btn-secondary:hover {
+  background: var(--bg-black);
+  color: #FFFFFF;
+  transform: translateY(-2px);
+}
+
+/* Red Highlight Text */
+.text-red {
+  color: var(--accent-red);
+}
+
+/* Custom Interactive Cursor Styling */
+.custom-cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--accent-red);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 9999;
+  transform: translate(-50%, -50%);
+  transition: width 0.2s ease, height 0.2s ease, background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.custom-cursor-dot {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  background-color: var(--accent-red);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 10000;
+  transform: translate(-50%, -50%);
+}
+
+.custom-cursor-hover {
+  width: 45px;
+  height: 45px;
+  background-color: rgba(224, 0, 0, 0.08);
+  border-color: var(--accent-red);
+}
+
+/* Disable custom cursor on touch devices for native touch accuracy */
+@media (pointer: coarse) {
+  .custom-cursor, .custom-cursor-dot {
+    display: none !important;
+  }
+}
+
+/* Marquee Animation */
+@keyframes marquee {
+  0% { transform: translateX(0%); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 35s linear infinite;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+/* Section Spacing */
+.section-padding {
+  padding: 8rem 2.5rem;
+}
+
+/* Mobile Responsiveness Overrides (< 768px) */
+@media (max-width: 768px) {
+  .section-padding {
+    padding: 4.5rem 1.25rem;
+  }
+
+  .mobile-text-center {
+    text-align: center !important;
+  }
+
+  .mobile-text-center span {
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
+
+  .btn-primary, .btn-secondary {
+    width: 100%;
+  }
+
+  h1 {
+    font-size: clamp(2.4rem, 10vw, 4rem) !important;
+  }
+
+  h2 {
+    font-size: clamp(2rem, 8vw, 3.2rem) !important;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #FFFFFF;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CCCCCC;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-red);
+}
