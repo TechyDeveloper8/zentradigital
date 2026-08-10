@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowRight, ArrowDownRight } from 'lucide-react';
+import { ArrowRight, ArrowDownRight, Award } from 'lucide-react';
 
 export default function Hero({ onOpenProjectModal }) {
   return (
@@ -11,7 +11,7 @@ export default function Hero({ onOpenProjectModal }) {
         width: '100%',
         display: 'flex',
         alignItems: 'center',
-        padding: '7rem 1.25rem 3rem 1.25rem',
+        padding: '7.5rem 1.25rem 3.5rem 1.25rem',
         zIndex: 2,
         backgroundColor: 'transparent',
       }}
@@ -27,13 +27,35 @@ export default function Hero({ onOpenProjectModal }) {
           alignItems: 'center',
         }}
       >
-        {/* Left Column Text & Headline (100% Unobstructed) */}
-        <div style={{ maxWidth: '680px', zIndex: 3 }}>
+        {/* Left Column Text & Headline (100% Unobstructed 70% Width) */}
+        <div style={{ maxWidth: '720px', zIndex: 3 }}>
+          {/* Badge */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              padding: '0.4rem 0.9rem',
+              background: '#0A0A0A',
+              color: '#FFFFFF',
+              borderRadius: '9999px',
+              fontSize: '0.78rem',
+              fontWeight: 700,
+              fontFamily: 'var(--font-body)',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              marginBottom: '1.75rem',
+            }}
+          >
+            <Award size={14} color="#E00000" />
+            <span>1+ YEARS OF DIGITAL EXPERIENCE</span>
+          </div>
+
           {/* Main Massive Editorial Headline */}
           <h1
             style={{
-              fontSize: 'clamp(2.5rem, 9.5vw, 5.8rem)',
-              lineHeight: 1.05,
+              fontSize: 'clamp(2.6rem, 8.5vw, 5.6rem)',
+              lineHeight: 1.04,
               fontWeight: 700,
               color: '#0A0A0A',
               textTransform: 'uppercase',
@@ -41,9 +63,9 @@ export default function Hero({ onOpenProjectModal }) {
               letterSpacing: '-0.04em',
             }}
           >
-            WE BUILD <br />
-            DIGITAL <br />
-            <span style={{ color: '#E00000' }}>MOMENTUM.</span>
+            WE MAKE <br />
+            BRANDS <br />
+            <span style={{ color: '#E00000' }}>IMPOSSIBLE TO IGNORE.</span>
           </h1>
 
           {/* Supporting Copy */}
@@ -53,11 +75,11 @@ export default function Hero({ onOpenProjectModal }) {
               color: '#555555',
               lineHeight: 1.6,
               fontWeight: 500,
-              marginBottom: '2.25rem',
-              maxWidth: '560px',
+              marginBottom: '2.5rem',
+              maxWidth: '580px',
             }}
           >
-            Zentra Digital combines strategy, creative, technology and performance to help ambitious brands grow in the digital world.
+            Zentra Digital combines strategy, creativity, technology and performance to help ambitious brands grow in the digital world.
           </p>
 
           {/* Action Buttons */}
@@ -74,7 +96,7 @@ export default function Hero({ onOpenProjectModal }) {
               className="btn-primary"
               style={{ padding: '1rem 2.2rem', fontSize: '1rem' }}
             >
-              <span>Start a Project</span>
+              <span>START A PROJECT</span>
               <ArrowRight size={18} />
             </button>
 
@@ -83,13 +105,13 @@ export default function Hero({ onOpenProjectModal }) {
               className="btn-secondary"
               style={{ padding: '1rem 2.2rem', fontSize: '1rem' }}
             >
-              <span>View Our Work</span>
+              <span>VIEW OUR WORK</span>
               <ArrowDownRight size={18} />
             </a>
           </div>
         </div>
 
-        {/* Right Column Spacer for 3D Digital Glass Core */}
+        {/* Right Column Reserved for 3D Digital Box Canvas */}
         <div style={{ pointerEvents: 'none', height: '100%' }} />
       </div>
     </section>

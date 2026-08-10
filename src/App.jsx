@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import CustomCursor from './components/CustomCursor';
-import DigitalCore3D from './components/DigitalCore3D';
+import DigitalBox3D from './components/DigitalBox3D';
 import Navbar from './components/Navbar';
 import Hero from './components/Hero';
 import About from './components/About';
@@ -24,17 +24,17 @@ export default function App() {
       {/* Custom Interactive Cursor */}
       <CustomCursor />
 
-      {/* Single 3D Digital Glass Core WebGL Scene (Right-Side Framed) */}
-      <DigitalCore3D />
+      {/* Single 3D Digital Box Container Scene */}
+      <DigitalBox3D />
 
       {/* Header Navigation */}
       <Navbar onOpenProjectModal={handleOpenModal} />
 
       <main style={{ position: 'relative', zIndex: 1 }}>
-        {/* Full-screen Hero (WE BUILD DIGITAL MOMENTUM.) */}
+        {/* Full-screen Hero (WE MAKE BRANDS IMPOSSIBLE TO IGNORE.) */}
         <Hero onOpenProjectModal={handleOpenModal} />
 
-        {/* Section 2 (DIGITAL GROWTH, WITHOUT THE NOISE.) */}
+        {/* Section 2 (DIGITAL GROWTH, BUILT DIFFERENTLY.) */}
         <About />
 
         {/* Capabilities (WHAT WE DO.) */}
