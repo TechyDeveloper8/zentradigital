@@ -13,7 +13,7 @@ export default function DigitalBox3D() {
     scene.background = new THREE.Color(0xFFFFFF);
     scene.fog = new THREE.FogExp2(0xFFFFFF, 0.02);
 
-    // 2. Camera Setup (50mm equivalent perspective angle for zero wide-angle distortion)
+    // 2. Camera Setup (50mm equivalent angle)
     const camera = new THREE.PerspectiveCamera(
       40,
       window.innerWidth / window.innerHeight,
@@ -22,7 +22,7 @@ export default function DigitalBox3D() {
     );
     camera.position.set(0, 1.2, 7.8);
 
-    // 3. WebGL Renderer with Shadows & High Quality Studio Settings
+    // 3. WebGL Renderer with Shadows & High Quality PBR Settings
     const isMobile = window.innerWidth <= 768;
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -31,12 +31,12 @@ export default function DigitalBox3D() {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
-    // 4. Studio Lighting System
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.6);
+    // 4. PBR Studio Lighting System
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
     scene.add(ambientLight);
 
-    // Key Studio Light (Upper Left)
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    // Soft White Key Light (Upper Left Front)
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.6);
     keyLight.position.set(-6, 12, 8);
     keyLight.castShadow = !isMobile;
     if (!isMobile) {
@@ -46,13 +46,13 @@ export default function DigitalBox3D() {
     }
     scene.add(keyLight);
 
-    // Fill Soft White Light (Right)
+    // Fill Light (Opposite Side)
     const fillLight = new THREE.DirectionalLight(0xffffff, 1.2);
     fillLight.position.set(6, 6, 6);
     scene.add(fillLight);
 
-    // Rim Zentra Red Light (From box rear)
-    const rimLight = new THREE.DirectionalLight(0xE00000, 1.4);
+    // Subtle Rim Zentra Red Light
+    const rimLight = new THREE.DirectionalLight(0xE00000, 1.5);
     rimLight.position.set(-8, -4, -4);
     scene.add(rimLight);
 
@@ -83,10 +83,11 @@ export default function DigitalBox3D() {
       metalness: 0.85,
     });
 
-    const whiteMat = new THREE.MeshStandardMaterial({
+    const whiteMat = new THREE.MeshPhysicalMaterial({
       color: 0xFFFFFF,
       roughness: 0.15,
       metalness: 0.1,
+      clearcoat: 0.4,
     });
 
     const redAccentMat = new THREE.MeshStandardMaterial({
@@ -147,11 +148,28 @@ export default function DigitalBox3D() {
     const brandBadge = new THREE.Mesh(brandBadgeGeo, redAccentMat);
     lidPivot.add(brandBadge);
 
-    // --- C. EXACTLY 5 REALISTIC 3D SOCIAL MEDIA HERO OBJECTS ---
+    // --- C. HIGH-PRECISION 3D SHAPE BUILDER HELPERS ---
     const iconsGroup = new THREE.Group();
     boxGroup.add(iconsGroup);
 
-    // Texture Generator Helper for Official Instagram Gradient
+    // Helper for Rounded Rectangle 2D Shape
+    const createRoundedRectShape = (w, h, r) => {
+      const shape = new THREE.Shape();
+      const x = -w / 2;
+      const y = -h / 2;
+      shape.moveTo(x, y + r);
+      shape.lineTo(x, y + h - r);
+      shape.quadraticCurveTo(x, y + h, x + r, y + h);
+      shape.lineTo(x + w - r, y + h);
+      shape.quadraticCurveTo(x + w, y + h, x + w, y + h - r);
+      shape.lineTo(x + w, y + r);
+      shape.quadraticCurveTo(x + w, y, x + w - r, y);
+      shape.lineTo(x + r, y);
+      shape.quadraticCurveTo(x, y, x, y + r);
+      return shape;
+    };
+
+    // Official Instagram Gradient Canvas Texture Generator
     const createInstagramTexture = () => {
       const canvas = document.createElement('canvas');
       canvas.width = 512;
@@ -175,11 +193,20 @@ export default function DigitalBox3D() {
 
     const instaGradTexture = createInstagramTexture();
 
-    // 1. INSTAGRAM — 100% LARGE HERO OBJECT
+    // 1. INSTAGRAM — 100% LARGE HERO OBJECT (Beveled Rounded Body + Raised White Camera)
     const createInstagram3D = () => {
       const g = new THREE.Group();
 
-      // Front Face Material with Instagram Gradient
+      const instaShape = createRoundedRectShape(0.74, 0.74, 0.16);
+      const extrudeOpts = {
+        depth: 0.16,
+        bevelEnabled: true,
+        bevelThickness: 0.03,
+        bevelSize: 0.03,
+        bevelSegments: 6,
+        curveSegments: 16,
+      };
+
       const instaFrontMat = new THREE.MeshPhysicalMaterial({
         map: instaGradTexture,
         roughness: 0.12,
@@ -188,211 +215,260 @@ export default function DigitalBox3D() {
         clearcoatRoughness: 0.1,
       });
 
-      const instaSideMat = new THREE.MeshStandardMaterial({
-        color: 0x3d1754,
-        roughness: 0.25,
-        metalness: 0.7,
-      });
-
-      // 3D Rounded Square Body with physical depth
-      const bodyGeo = new THREE.BoxGeometry(0.72, 0.72, 0.20);
-      const materials = [
-        instaSideMat, instaSideMat, instaSideMat, instaSideMat,
-        instaFrontMat, instaSideMat,
-      ];
-      const body = new THREE.Mesh(bodyGeo, materials);
+      const instaGeo = new THREE.ExtrudeGeometry(instaShape, extrudeOpts);
+      instaGeo.center();
+      const body = new THREE.Mesh(instaGeo, instaFrontMat);
       body.castShadow = true;
       g.add(body);
 
-      // Extruded Physical White Camera Symbol
-      const outerRingGeo = new THREE.TorusGeometry(0.19, 0.024, 16, 32);
-      const outerRing = new THREE.Mesh(outerRingGeo, whiteMat);
-      outerRing.position.z = 0.11;
-      g.add(outerRing);
+      // Raised Physical White Camera Outline
+      const camShape = createRoundedRectShape(0.38, 0.38, 0.09);
+      const camHole = createRoundedRectShape(0.30, 0.30, 0.07);
+      camShape.holes.push(camHole);
 
-      const lensGeo = new THREE.CylinderGeometry(0.085, 0.085, 0.04, 24);
+      const camGeo = new THREE.ExtrudeGeometry(camShape, {
+        depth: 0.03,
+        bevelEnabled: true,
+        bevelThickness: 0.008,
+        bevelSize: 0.008,
+        bevelSegments: 4,
+      });
+      camGeo.center();
+      const camMesh = new THREE.Mesh(camGeo, whiteMat);
+      camMesh.position.z = 0.115;
+      g.add(camMesh);
+
+      // Center Camera Lens Ring
+      const lensGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.03, 24);
       lensGeo.rotateX(Math.PI / 2);
       const lens = new THREE.Mesh(lensGeo, whiteMat);
-      lens.position.z = 0.11;
+      lens.position.z = 0.115;
       g.add(lens);
 
-      const flashGeo = new THREE.SphereGeometry(0.038, 16, 16);
+      // Flash Dot
+      const flashGeo = new THREE.SphereGeometry(0.032, 16, 16);
       const flash = new THREE.Mesh(flashGeo, whiteMat);
-      flash.position.set(0.21, 0.21, 0.11);
+      flash.position.set(0.20, 0.20, 0.115);
       g.add(flash);
 
       return g;
     };
 
-    // 2. FACEBOOK — 90% LARGE HERO OBJECT
+    // 2. FACEBOOK — 90% LARGE HERO OBJECT (3D Beveled "f" Sculpture)
     const createFacebook3D = () => {
       const g = new THREE.Group();
 
-      const fbFrontMat = new THREE.MeshStandardMaterial({
+      const fbShape = new THREE.Shape();
+      // Precise 3D 'f' vector contour
+      fbShape.moveTo(-0.15, -0.36);
+      fbShape.lineTo(-0.02, -0.36);
+      fbShape.lineTo(-0.02, -0.04);
+      fbShape.lineTo(0.12, -0.04);
+      fbShape.lineTo(0.14, 0.08);
+      fbShape.lineTo(-0.02, 0.08);
+      fbShape.lineTo(-0.02, 0.20);
+      fbShape.quadraticCurveTo(-0.02, 0.34, 0.12, 0.34);
+      fbShape.lineTo(0.18, 0.34);
+      fbShape.lineTo(0.18, 0.44);
+      fbShape.lineTo(0.06, 0.44);
+      fbShape.quadraticCurveTo(-0.16, 0.44, -0.16, 0.22);
+      fbShape.lineTo(-0.16, 0.08);
+      fbShape.lineTo(-0.24, 0.08);
+      fbShape.lineTo(-0.24, -0.04);
+      fbShape.lineTo(-0.16, -0.04);
+      fbShape.closePath();
+
+      const extrudeOpts = {
+        depth: 0.18,
+        bevelEnabled: true,
+        bevelThickness: 0.03,
+        bevelSize: 0.03,
+        bevelSegments: 6,
+        curveSegments: 16,
+      };
+
+      const fbMat = new THREE.MeshPhysicalMaterial({
         color: 0x1877F2,
-        roughness: 0.2,
-        metalness: 0.4,
+        roughness: 0.18,
+        metalness: 0.35,
+        clearcoat: 0.4,
       });
 
-      const fbSideMat = new THREE.MeshStandardMaterial({
-        color: 0x0a3c82,
-        roughness: 0.35,
-        metalness: 0.6,
-      });
-
-      const bodyGeo = new THREE.BoxGeometry(0.72, 0.72, 0.20);
-      const materials = [
-        fbSideMat, fbSideMat, fbSideMat, fbSideMat,
-        fbFrontMat, fbSideMat,
-      ];
-      const body = new THREE.Mesh(bodyGeo, materials);
-      body.castShadow = true;
-      g.add(body);
-
-      // Extruded Physical 3D 'f' Emblem
-      const fStemGeo = new THREE.BoxGeometry(0.10, 0.46, 0.06);
-      fStemGeo.translate(0.07, -0.02, 0.12);
-      const fStem = new THREE.Mesh(fStemGeo, whiteMat);
-      g.add(fStem);
-
-      const fBarGeo = new THREE.BoxGeometry(0.24, 0.09, 0.06);
-      fBarGeo.translate(0.07, 0.06, 0.12);
-      const fBar = new THREE.Mesh(fBarGeo, whiteMat);
-      g.add(fBar);
-
-      const fTopGeo = new THREE.BoxGeometry(0.20, 0.09, 0.06);
-      fTopGeo.translate(0.12, 0.19, 0.12);
-      const fTop = new THREE.Mesh(fTopGeo, whiteMat);
-      g.add(fTop);
+      const fbGeo = new THREE.ExtrudeGeometry(fbShape, extrudeOpts);
+      fbGeo.center();
+      const fbMesh = new THREE.Mesh(fbGeo, fbMat);
+      fbMesh.castShadow = true;
+      g.add(fbMesh);
 
       return g;
     };
 
-    // 3. WHATSAPP — 60% SMALLER OBJECT
+    // 3. WHATSAPP — 60% SMALLER OBJECT (Complete Beveled Speech-Bubble + Raised White Handset)
     const createWhatsApp3D = () => {
       const g = new THREE.Group();
 
-      const waMat = new THREE.MeshStandardMaterial({
+      const waShape = new THREE.Shape();
+      // Circle with lower-left speech bubble tail
+      const r = 0.35;
+      waShape.absarc(0, 0, r, 0.8 * Math.PI, 2.3 * Math.PI, false);
+      waShape.lineTo(-r * 0.95, -r * 0.95);
+      waShape.closePath();
+
+      const extrudeOpts = {
+        depth: 0.15,
+        bevelEnabled: true,
+        bevelThickness: 0.025,
+        bevelSize: 0.025,
+        bevelSegments: 6,
+        curveSegments: 24,
+      };
+
+      const waMat = new THREE.MeshPhysicalMaterial({
         color: 0x25D366,
-        roughness: 0.3,
+        roughness: 0.2,
         metalness: 0.2,
+        clearcoat: 0.3,
       });
 
-      const waSideMat = new THREE.MeshStandardMaterial({
-        color: 0x126932,
-        roughness: 0.4,
-        metalness: 0.4,
+      const waGeo = new THREE.ExtrudeGeometry(waShape, extrudeOpts);
+      waGeo.center();
+      const waMesh = new THREE.Mesh(waGeo, waMat);
+      waMesh.castShadow = true;
+      g.add(waMesh);
+
+      // Raised Physical White Telephone Handset
+      const handsetShape = new THREE.Shape();
+      handsetShape.moveTo(-0.11, -0.04);
+      handsetShape.quadraticCurveTo(-0.13, 0.09, -0.02, 0.14);
+      handsetShape.quadraticCurveTo(0.05, 0.16, 0.12, 0.08);
+      handsetShape.quadraticCurveTo(0.14, 0.04, 0.09, 0.01);
+      handsetShape.quadraticCurveTo(0.05, -0.03, 0.02, 0.03);
+      handsetShape.quadraticCurveTo(-0.02, 0.07, -0.04, 0.05);
+      handsetShape.quadraticCurveTo(-0.08, 0.02, -0.05, -0.03);
+      handsetShape.quadraticCurveTo(-0.08, -0.08, -0.11, -0.04);
+
+      const handsetGeo = new THREE.ExtrudeGeometry(handsetShape, {
+        depth: 0.025,
+        bevelEnabled: true,
+        bevelThickness: 0.006,
+        bevelSize: 0.006,
+        bevelSegments: 3,
       });
-
-      const bodyGeo = new THREE.CylinderGeometry(0.30, 0.30, 0.16, 32);
-      bodyGeo.rotateX(Math.PI / 2);
-      const body = new THREE.Mesh(bodyGeo, waMat);
-      body.castShadow = true;
-      g.add(body);
-
-      const tailGeo = new THREE.ConeGeometry(0.11, 0.20, 3);
-      tailGeo.rotateZ(-Math.PI * 0.75);
-      tailGeo.rotateX(Math.PI / 2);
-      const tail = new THREE.Mesh(tailGeo, waSideMat);
-      tail.position.set(-0.21, -0.21, 0);
-      g.add(tail);
-
-      // WhatsApp Phone Handset Emblem
-      const phoneRingGeo = new THREE.TorusGeometry(0.13, 0.024, 12, 24, Math.PI * 0.65);
-      phoneRingGeo.rotateZ(Math.PI * 0.2);
-      const phoneRing = new THREE.Mesh(phoneRingGeo, whiteMat);
-      phoneRing.position.z = 0.09;
-      g.add(phoneRing);
+      handsetGeo.center();
+      const handsetMesh = new THREE.Mesh(handsetGeo, whiteMat);
+      handsetMesh.position.set(0.01, 0.01, 0.095);
+      handsetMesh.rotation.z = Math.PI * 0.12;
+      g.add(handsetMesh);
 
       return g;
     };
 
-    // 4. YOUTUBE — 58% SMALLER OBJECT
+    // 4. YOUTUBE — 58% SMALLER OBJECT (Rounded Capsule Button + Raised White Play Triangle)
     const createYouTube3D = () => {
       const g = new THREE.Group();
 
-      const ytFrontMat = new THREE.MeshStandardMaterial({
+      const ytShape = createRoundedRectShape(0.78, 0.54, 0.18);
+      const extrudeOpts = {
+        depth: 0.16,
+        bevelEnabled: true,
+        bevelThickness: 0.03,
+        bevelSize: 0.03,
+        bevelSegments: 6,
+        curveSegments: 16,
+      };
+
+      const ytMat = new THREE.MeshPhysicalMaterial({
         color: 0xFF0000,
-        roughness: 0.15,
+        roughness: 0.12,
         metalness: 0.3,
+        clearcoat: 0.5,
       });
 
-      const ytSideMat = new THREE.MeshStandardMaterial({
-        color: 0x800000,
-        roughness: 0.3,
-        metalness: 0.5,
+      const ytGeo = new THREE.ExtrudeGeometry(ytShape, extrudeOpts);
+      ytGeo.center();
+      const ytMesh = new THREE.Mesh(ytGeo, ytMat);
+      ytMesh.castShadow = true;
+      g.add(ytMesh);
+
+      // Raised 3D White Play Triangle Prism
+      const playShape = new THREE.Shape();
+      playShape.moveTo(-0.08, -0.14);
+      playShape.lineTo(0.14, 0);
+      playShape.lineTo(-0.08, 0.14);
+      playShape.closePath();
+
+      const playGeo = new THREE.ExtrudeGeometry(playShape, {
+        depth: 0.03,
+        bevelEnabled: true,
+        bevelThickness: 0.008,
+        bevelSize: 0.008,
+        bevelSegments: 4,
       });
-
-      const bodyGeo = new THREE.BoxGeometry(0.76, 0.52, 0.16);
-      const materials = [
-        ytSideMat, ytSideMat, ytSideMat, ytSideMat,
-        ytFrontMat, ytSideMat,
-      ];
-      const body = new THREE.Mesh(bodyGeo, materials);
-      body.castShadow = true;
-      g.add(body);
-
-      // Recessed/Raised White 3D Play Triangle Prism
-      const playShape = new THREE.ConeGeometry(0.17, 0.06, 3);
-      playShape.rotateZ(-Math.PI / 2);
-      playShape.rotateX(Math.PI / 2);
-      const playMesh = new THREE.Mesh(playShape, whiteMat);
-      playMesh.position.set(0.02, 0, 0.10);
+      playGeo.center();
+      const playMesh = new THREE.Mesh(playGeo, whiteMat);
+      playMesh.position.set(0.01, 0, 0.11);
       g.add(playMesh);
 
       return g;
     };
 
-    // 5. LINKEDIN — 55% SMALLER OBJECT
+    // 5. LINKEDIN — 55% SMALLER OBJECT (3D Beveled "in" Sculpture)
     const createLinkedIn3D = () => {
       const g = new THREE.Group();
 
-      const liFrontMat = new THREE.MeshStandardMaterial({
+      const liShape = new THREE.Shape();
+      // Precise 3D 'in' vector contour
+      // 'i' dot
+      liShape.moveTo(-0.28, 0.16);
+      liShape.lineTo(-0.16, 0.16);
+      liShape.lineTo(-0.16, 0.28);
+      liShape.lineTo(-0.28, 0.28);
+      liShape.closePath();
+
+      // 'i' stem
+      liShape.moveTo(-0.28, -0.26);
+      liShape.lineTo(-0.16, -0.26);
+      liShape.lineTo(-0.16, 0.08);
+      liShape.lineTo(-0.28, 0.08);
+      liShape.closePath();
+
+      // 'n' stem & arch
+      liShape.moveTo(-0.08, -0.26);
+      liShape.lineTo(0.04, -0.26);
+      liShape.lineTo(0.04, -0.02);
+      liShape.quadraticCurveTo(0.04, 0.09, 0.15, 0.09);
+      liShape.quadraticCurveTo(0.24, 0.09, 0.24, -0.02);
+      liShape.lineTo(0.24, -0.26);
+      liShape.lineTo(0.35, -0.26);
+      liShape.lineTo(0.35, -0.01);
+      liShape.quadraticCurveTo(0.35, 0.22, 0.15, 0.22);
+      liShape.quadraticCurveTo(-0.04, 0.22, -0.08, 0.06);
+      liShape.lineTo(-0.08, 0.08);
+      liShape.lineTo(-0.20, 0.08);
+      liShape.lineTo(-0.08, -0.26);
+      liShape.closePath();
+
+      const extrudeOpts = {
+        depth: 0.15,
+        bevelEnabled: true,
+        bevelThickness: 0.025,
+        bevelSize: 0.025,
+        bevelSegments: 6,
+        curveSegments: 16,
+      };
+
+      const liMat = new THREE.MeshPhysicalMaterial({
         color: 0x0A66C2,
-        roughness: 0.25,
-        metalness: 0.5,
+        roughness: 0.22,
+        metalness: 0.4,
+        clearcoat: 0.3,
       });
 
-      const liSideMat = new THREE.MeshStandardMaterial({
-        color: 0x04284d,
-        roughness: 0.4,
-        metalness: 0.6,
-      });
-
-      const bodyGeo = new THREE.BoxGeometry(0.62, 0.62, 0.16);
-      const materials = [
-        liSideMat, liSideMat, liSideMat, liSideMat,
-        liFrontMat, liSideMat,
-      ];
-      const body = new THREE.Mesh(bodyGeo, materials);
-      body.castShadow = true;
-      g.add(body);
-
-      // Extruded 3D 'in' Symbol
-      const iDotGeo = new THREE.SphereGeometry(0.042, 12, 12);
-      iDotGeo.translate(-0.17, 0.15, 0.10);
-      const iDot = new THREE.Mesh(iDotGeo, whiteMat);
-      g.add(iDot);
-
-      const iStemGeo = new THREE.BoxGeometry(0.075, 0.22, 0.05);
-      iStemGeo.translate(-0.17, -0.04, 0.10);
-      const iStem = new THREE.Mesh(iStemGeo, whiteMat);
-      g.add(iStem);
-
-      const nStemGeo = new THREE.BoxGeometry(0.075, 0.22, 0.05);
-      nStemGeo.translate(0.02, -0.04, 0.10);
-      const nStem = new THREE.Mesh(nStemGeo, whiteMat);
-      g.add(nStem);
-
-      const nArchGeo = new THREE.BoxGeometry(0.15, 0.075, 0.05);
-      nArchGeo.translate(0.09, 0.03, 0.10);
-      const nArch = new THREE.Mesh(nArchGeo, whiteMat);
-      g.add(nArch);
-
-      const nLegGeo = new THREE.BoxGeometry(0.075, 0.15, 0.05);
-      nLegGeo.translate(0.14, -0.07, 0.10);
-      const nLeg = new THREE.Mesh(nLegGeo, whiteMat);
-      g.add(nLeg);
+      const liGeo = new THREE.ExtrudeGeometry(liShape, extrudeOpts);
+      liGeo.center();
+      const liMesh = new THREE.Mesh(liGeo, liMat);
+      liMesh.castShadow = true;
+      g.add(liMesh);
 
       return g;
     };
@@ -405,7 +481,7 @@ export default function DigitalBox3D() {
         targetPos: new THREE.Vector3(-2.1, 2.1, 1.4), // Upper Left
         targetRot: new THREE.Vector3(0.3, 0.4, -0.15),
         scale: 1.15, // 100% LARGE
-        launchSec: 2.00, // 2.00s
+        launchSec: 2.00,
       },
       {
         name: 'Facebook',
@@ -413,31 +489,31 @@ export default function DigitalBox3D() {
         targetPos: new THREE.Vector3(1.9, 2.3, 1.2), // Upper Right
         targetRot: new THREE.Vector3(-0.25, -0.4, 0.1),
         scale: 1.035, // 90% LARGE
-        launchSec: 2.15, // 2.15s
+        launchSec: 2.15,
       },
       {
         name: 'WhatsApp',
         createFn: createWhatsApp3D,
         targetPos: new THREE.Vector3(-0.2, 2.7, 0.4), // Middle Left High
-        targetRot: new THREE.Vector3(0.2, 0.6, -0.2),
+        targetRot: new THREE.Vector3(0.15, 0.2, -0.05),
         scale: 0.69, // 60% SMALL
-        launchSec: 2.35, // 2.35s
+        launchSec: 2.35,
       },
       {
         name: 'YouTube',
         createFn: createYouTube3D,
-        targetPos: new THREE.Vector3(2.5, 0.9, 0.6), // Middle Right
-        targetRot: new THREE.Vector3(-0.4, 0.5, -0.2),
+        targetPos: new THREE.Vector3(1.35, 1.15, 0.7), // Floating Safely Above Box (Inside Viewport)
+        targetRot: new THREE.Vector3(-0.15, 0.2, -0.05),
         scale: 0.667, // 58% SMALL
-        launchSec: 2.50, // 2.50s
+        launchSec: 2.50,
       },
       {
         name: 'LinkedIn',
         createFn: createLinkedIn3D,
-        targetPos: new THREE.Vector3(-2.5, 0.7, 0.5), // Upper Middle Right
-        targetRot: new THREE.Vector3(0.4, -0.5, 0.25),
+        targetPos: new THREE.Vector3(-1.8, 1.1, 0.5), // Front-facing near upper-left/middle
+        targetRot: new THREE.Vector3(0.04, -0.05, 0.0), // Subtle front-facing perspective
         scale: 0.6325, // 55% SMALL
-        launchSec: 2.70, // 2.70s
+        launchSec: 2.70,
       },
     ];
 
@@ -495,21 +571,6 @@ export default function DigitalBox3D() {
       const elapsedTime = clock.getElapsedTime();
       const loopTime = elapsedTime % LOOP_DURATION;
 
-      // Exact prompt timeline stages:
-      // 0.0 - 1.0s: Box closed
-      // 1.0 - 1.5s: Red light begins glowing inside
-      // 1.5 - 2.0s: Box lid starts opening naturally
-      // 2.00s: Instagram launches
-      // 2.15s: Facebook launches
-      // 2.35s: WhatsApp launches
-      // 2.50s: YouTube launches
-      // 2.70s: LinkedIn launches
-      // 3.5 - 5.0s: Icons reach floating positions
-      // 5.0 - 8.0s: Icons gently float
-      // 8.0 - 10.0s: Icons return toward box
-      // 10.0 - 11.0s: Box closes
-      // 11.0 - 12.0s: Short pause
-
       let lidAngle = 0;
       let glowIntensity = 0;
       let vibrationY = 0;
@@ -518,11 +579,11 @@ export default function DigitalBox3D() {
         lidAngle = 0;
         glowIntensity = 0.1;
       } else if (loopTime < 1.5) {
-        const t = (loopTime - 1.0) / 0.5; // 0 to 1
+        const t = (loopTime - 1.0) / 0.5;
         glowIntensity = 0.1 + t * 2.5;
         vibrationY = Math.sin(t * 40) * 0.012;
       } else if (loopTime < 2.0) {
-        const t = (loopTime - 1.5) / 0.5; // 0 to 1
+        const t = (loopTime - 1.5) / 0.5;
         lidAngle = -t * (Math.PI * 0.65);
         glowIntensity = 2.6 + t * 2.0;
       } else if (loopTime < 8.0) {
@@ -550,16 +611,13 @@ export default function DigitalBox3D() {
         if (loopTime < item.launchSec) {
           iconProg = 0;
         } else if (loopTime < 5.0) {
-          // Launch phase (launchSec -> 5.0s) with inertia & decelerated arrival
           const totalLaunchTime = 5.0 - item.launchSec;
           const currentLaunchTime = loopTime - item.launchSec;
           const rawProg = Math.min(Math.max(currentLaunchTime / totalLaunchTime, 0), 1);
-          iconProg = Math.sin(rawProg * Math.PI * 0.5); // Ease out
+          iconProg = Math.sin(rawProg * Math.PI * 0.5);
         } else if (loopTime < 8.0) {
-          // Floating phase (5.0s - 8.0s)
           iconProg = 1;
         } else if (loopTime < 10.0) {
-          // Return phase (8.0s - 10.0s)
           const returnTime = (loopTime - 8.0) / 2.0;
           iconProg = 1 - Math.pow(returnTime, 2);
         } else {
@@ -568,13 +626,17 @@ export default function DigitalBox3D() {
 
         // Parabolic trajectory + subtle float (±5px)
         const floatY = loopTime >= 2.0 ? Math.sin(elapsedTime * 1.5 + i * 1.2) * 0.06 : 0;
-        const currentX = THREE.MathUtils.lerp(0, item.targetPos.x, iconProg);
+        let currentX = THREE.MathUtils.lerp(0, item.targetPos.x, iconProg);
         const currentY = THREE.MathUtils.lerp(-0.2, item.targetPos.y + Math.sin(iconProg * Math.PI) * 0.3 + floatY, iconProg);
         const currentZ = THREE.MathUtils.lerp(0, item.targetPos.z, iconProg);
 
+        // Hard Viewport Clamp for YouTube (NEVER leave viewport)
+        if (fiveIconsSpecs[i].name === 'YouTube') {
+          currentX = Math.min(currentX, 1.45);
+        }
+
         item.group.position.set(currentX, currentY, currentZ);
 
-        // Scale swell according to prompt size hierarchy
         const scaleVal = item.baseScale * iconProg;
         item.group.scale.set(
           Math.max(scaleVal, 0.0001),
@@ -582,9 +644,11 @@ export default function DigitalBox3D() {
           Math.max(scaleVal, 0.0001)
         );
 
-        // Subtle 3D rotation float (no rapid spinning)
-        item.group.rotation.x = item.targetRot.x * iconProg + Math.sin(elapsedTime * 0.7 + i) * 0.07;
-        item.group.rotation.y = item.targetRot.y * iconProg + Math.cos(elapsedTime * 0.5 + i) * 0.09;
+        // Subtle 3D rotation float (LinkedIn stays front-facing readable)
+        const isLinkedIn = fiveIconsSpecs[i].name === 'LinkedIn';
+        const rotMult = isLinkedIn ? 0.02 : 0.07;
+        item.group.rotation.x = item.targetRot.x * iconProg + Math.sin(elapsedTime * 0.7 + i) * rotMult;
+        item.group.rotation.y = item.targetRot.y * iconProg + Math.cos(elapsedTime * 0.5 + i) * rotMult;
         item.group.rotation.z = item.targetRot.z * iconProg;
       });
 
