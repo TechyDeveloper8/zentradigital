@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { ArrowUpRight } from 'lucide-react';
 
-export default function Services({ onOpenProjectModal }) {
+export default function Services() {
   const [hoveredIdx, setHoveredIdx] = useState(null);
 
   const services = [
@@ -51,7 +50,7 @@ export default function Services({ onOpenProjectModal }) {
           </h2>
         </div>
 
-        {/* Minimal Interactive Vertical List */}
+        {/* Minimal Interactive Vertical List (Informational Only - No Redirection) */}
         <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
           {services.map((item, idx) => {
             const isHovered = hoveredIdx === idx;
@@ -61,12 +60,11 @@ export default function Services({ onOpenProjectModal }) {
                 key={item.num}
                 onMouseEnter={() => setHoveredIdx(idx)}
                 onMouseLeave={() => setHoveredIdx(null)}
-                onClick={onOpenProjectModal}
                 style={{
                   position: 'relative',
                   padding: '1.75rem 1rem',
                   borderBottom: '1px solid var(--border-subtle)',
-                  cursor: 'pointer',
+                  cursor: 'default',
                   transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
                   display: 'flex',
                   alignItems: 'center',
@@ -134,24 +132,6 @@ export default function Services({ onOpenProjectModal }) {
                       </p>
                     )}
                   </div>
-                </div>
-
-                {/* Arrow */}
-                <div
-                  style={{
-                    width: '38px',
-                    height: '38px',
-                    borderRadius: '50%',
-                    background: isHovered ? '#E00000' : '#0A0A0A',
-                    color: '#FFFFFF',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                    transition: 'all 0.3s ease',
-                  }}
-                >
-                  <ArrowUpRight size={18} />
                 </div>
               </div>
             );

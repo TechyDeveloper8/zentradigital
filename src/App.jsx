@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import CustomCursor from './components/CustomCursor';
 import DigitalBox3D from './components/DigitalBox3D';
 import Navbar from './components/Navbar';
@@ -11,13 +11,12 @@ import Team from './components/Team';
 import WhyZentra from './components/WhyZentra';
 import FinalCTA from './components/FinalCTA';
 import Footer from './components/Footer';
-import ProjectModal from './components/ProjectModal';
 
 export default function App() {
-  const [isModalOpen, setIsModalOpen] = useState(false);
-
-  const handleOpenModal = () => setIsModalOpen(true);
-  const handleCloseModal = () => setIsModalOpen(false);
+  const handleOpenModal = () => {
+    const whatsappUrl = `https://wa.me/916202050810?text=${encodeURIComponent('Hi Zentra Digital, I want to start a project!')}`;
+    window.open(whatsappUrl, '_blank');
+  };
 
   return (
     <div style={{ position: 'relative', width: '100%', minHeight: '100vh', backgroundColor: '#FFFFFF' }}>
@@ -37,8 +36,8 @@ export default function App() {
         {/* Section 2 (DIGITAL GROWTH, BUILT DIFFERENTLY.) */}
         <About />
 
-        {/* Capabilities (WHAT WE DO.) */}
-        <Services onOpenProjectModal={handleOpenModal} />
+        {/* Capabilities (WHAT WE DO. Informational list only, no redirection) */}
+        <Services />
 
         {/* Portfolio (WORK THAT MOVES BRANDS.) */}
         <CaseStudies onOpenProjectModal={handleOpenModal} />
@@ -58,9 +57,6 @@ export default function App() {
 
       {/* Minimal Black Footer */}
       <Footer />
-
-      {/* Project Initiation Modal */}
-      <ProjectModal isOpen={isModalOpen} onClose={handleCloseModal} />
     </div>
   );
 }

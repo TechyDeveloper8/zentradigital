@@ -1,7 +1,10 @@
 import React from 'react';
-import { ArrowRight, Phone } from 'lucide-react';
+import { ArrowRight, Phone, MessageCircle } from 'lucide-react';
 
 export default function FinalCTA({ onOpenProjectModal }) {
+  const whatsappPhone = '916202050810';
+  const whatsappUrl = `https://wa.me/${whatsappPhone}?text=${encodeURIComponent('Hi Zentra Digital, I want to start a project!')}`;
+
   return (
     <section
       id="cta"
@@ -64,7 +67,7 @@ export default function FinalCTA({ onOpenProjectModal }) {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            gap: '1.5rem',
+            gap: '1.25rem',
             flexWrap: 'wrap',
             marginBottom: '3.5rem',
           }}
@@ -77,6 +80,29 @@ export default function FinalCTA({ onOpenProjectModal }) {
             <span>Start a Project</span>
             <ArrowRight size={18} />
           </button>
+
+          <a
+            href={whatsappUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.6rem',
+              padding: '1.1rem 2.2rem',
+              background: '#25D366',
+              color: '#FFFFFF',
+              borderRadius: '9999px',
+              fontSize: '1.05rem',
+              fontWeight: 700,
+              textDecoration: 'none',
+              boxShadow: '0 4px 20px rgba(37,211,102,0.3)',
+              transition: 'transform 0.2s ease',
+            }}
+          >
+            <MessageCircle size={20} />
+            <span>Chat on WhatsApp</span>
+          </a>
         </div>
 
         {/* Direct Phone Contact */}

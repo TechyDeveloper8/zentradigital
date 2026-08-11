@@ -42,12 +42,24 @@ export default function Footer() {
             <a
               href="#"
               style={{
-                display: 'inline-block',
+                display: 'inline-flex',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                gap: '0.75rem',
                 textDecoration: 'none',
                 color: '#FFFFFF',
                 marginBottom: '1rem',
               }}
             >
+              <img
+                src="/logoofclient/zentra_digital-removebg-preview.png"
+                alt="Zentra Digital Logo"
+                style={{
+                  height: '50px',
+                  width: 'auto',
+                  objectFit: 'contain',
+                }}
+              />
               <span
                 style={{
                   fontFamily: 'var(--font-heading)',
@@ -116,10 +128,16 @@ export default function Footer() {
               CONNECT
             </h4>
             <div style={{ display: 'flex', gap: '0.85rem', marginBottom: '1.5rem' }}>
-              {['Instagram', 'LinkedIn', 'Facebook'].map((soc) => (
+              {[
+                { name: 'Instagram', url: 'https://www.instagram.com/zentra_digital/' },
+                { name: 'LinkedIn', url: 'https://www.linkedin.com/company/109068474' },
+                { name: 'Facebook', url: 'https://www.facebook.com/share/1DECDvAGw5/' },
+              ].map((soc) => (
                 <a
-                  key={soc}
-                  href="#"
+                  key={soc.name}
+                  href={soc.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   style={{
                     padding: '0.45rem 0.85rem',
                     borderRadius: '4px',
@@ -130,9 +148,18 @@ export default function Footer() {
                     fontSize: '0.75rem',
                     fontWeight: 600,
                     textDecoration: 'none',
+                    transition: 'all 0.2s ease',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = '#FFFFFF';
+                    e.currentTarget.style.borderColor = '#E00000';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = '#CCCCCC';
+                    e.currentTarget.style.borderColor = '#222222';
                   }}
                 >
-                  {soc}
+                  {soc.name}
                 </a>
               ))}
             </div>
@@ -159,28 +186,57 @@ export default function Footer() {
           </div>
         </div>
 
-        {/* Bottom */}
+        {/* Bottom Row with Centered ZeroRift Branding */}
         <div
           style={{
             paddingTop: '2rem',
             borderTop: '1px solid #1A1A1A',
-            display: 'flex',
-            justifyContent: 'space-between',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
             alignItems: 'center',
-            flexWrap: 'wrap',
             gap: '1rem',
             fontFamily: 'var(--font-body)',
-            fontSize: '0.78rem',
+            fontSize: '0.8rem',
             color: '#888888',
           }}
         >
           <div>© 2026 Zentra Digital. All rights reserved.</div>
-          <div style={{ display: 'flex', gap: '1.5rem' }}>
+
+          {/* Centered ZeroRift Branding */}
+          <div style={{ textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}>
+            <span>Engineered by</span>
+            <a
+              href="https://zerorift.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                color: '#FFFFFF',
+                fontWeight: 700,
+                textDecoration: 'none',
+                letterSpacing: '0.05em',
+                transition: 'color 0.2s ease',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#E00000')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = '#FFFFFF')}
+            >
+              ZeroRift<span style={{ color: '#E00000' }}>.</span>
+            </a>
+          </div>
+
+          <div style={{ display: 'flex', gap: '1.5rem', justifyContent: 'flex-end' }} className="footer-links-right">
             <a href="#" style={{ color: '#888888', textDecoration: 'none' }}>Privacy Policy</a>
             <a href="#" style={{ color: '#888888', textDecoration: 'none' }}>Terms of Service</a>
           </div>
         </div>
       </div>
+
+      <style>{`
+        @media (max-width: 768px) {
+          .footer-links-right {
+            justify-content: flex-start !important;
+          }
+        }
+      `}</style>
     </footer>
   );
 }
