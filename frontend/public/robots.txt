@@ -1,0 +1,22 @@
+# Robots.txt for Zentra Digital
+# https://zentradigital.com
+
+User-agent: *
+Allow: /
+Allow: /logoofclient/
+Allow: /favicon_io/
+
+# Disallow internal authentication and ERP portals
+Disallow: /admin
+Disallow: /admin/
+Disallow: /client
+Disallow: /client/
+Disallow: /employee
+Disallow: /employee/
+Disallow: /sales
+Disallow: /sales/
+Disallow: /api/
+Disallow: /uploads/
+
+# Sitemap location
+Sitemap: https://zentradigital.com/sitemap.xml

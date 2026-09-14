@@ -1,16 +1,43 @@
-# React + Vite
+# 🌐 Zentra Digital - Fullstack Website & Enterprise ERP Portal
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Modern, agency website and internal business operating system organized in clean **Frontend** and **Backend** directories for easy development, management, and hosting.
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## 📂 Architecture
 
-## React Compiler
+```
+zentra/
+├── frontend/        # React 19 + Vite Single Page Application (Marketing & Portals)
+├── backend/         # Express + SQLite + WebSocket REST & Realtime API Server
+├── package.json     # Root orchestrator with simultaneous dev & build scripts
+├── DEPLOYMENT_GUIDE.md # Complete hosting instructions (Vercel, Netlify, Render, cPanel, VPS)
+└── README.md        # This file
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the Oxlint configuration
+## ⚡ Quickstart
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+### 1. Install all dependencies
+```bash
+npm run install:all
+```
+
+### 2. Run both Frontend & Backend
+```bash
+npm run dev
+```
+- **Public Website**: [http://localhost:5173](http://localhost:5173)
+- **Backend API**: [http://localhost:5000/api](http://localhost:5000/api)
+- **Portal Login (Internal)**: [http://localhost:5173/login](http://localhost:5173/login)
+
+### 3. Dedicated Scripts
+- `npm run dev:frontend` - Run only the frontend
+- `npm run dev:backend` - Run only the backend
+- `npm run build` - Compile the frontend for production
+
+---
+
+## 🚀 Deployment & Uploading
+For step-by-step instructions on uploading and deploying to **Vercel**, **Netlify**, **Render**, **Railway**, **cPanel**, or **VPS**, see the complete **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**.
