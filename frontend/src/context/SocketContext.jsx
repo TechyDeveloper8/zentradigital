@@ -31,6 +31,10 @@ function getWsUrl() {
   if (window.location.port === '5173' || (window.location.hostname === 'localhost' && window.location.port !== '5000')) {
     return `ws://${window.location.hostname}:5000/ws`;
   }
+  // Vercel does not support WebSocket proxying; connect directly to live Render backend
+  if (window.location.hostname.includes('zentradigital.agency') || window.location.hostname.includes('vercel.app')) {
+    return 'wss://zentradigital.onrender.com/ws';
+  }
   const defaultProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${defaultProtocol}//${window.location.host}/ws`;
 }

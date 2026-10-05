@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: zentra-digital
+    name: zentradigital
     runtime: node
     plan: free
     region: oregon

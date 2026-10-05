@@ -78,7 +78,7 @@ npm run dev
    - `JWT_SECRET`: A secure random string (e.g. `your-random-production-jwt-key`)
    - `MONGODB_URI`: Your MongoDB connection URI (e.g. `mongodb+srv://<user>:<password>@cluster0.mongodb.net/zentra_digital?retryWrites=true&w=majority`)
 8. Click **Deploy**.
-9. Copy your live backend URL (e.g., `https://zentra-backend.onrender.com`).
+9. Copy your live backend URL (`https://zentradigital.onrender.com`).
 
 #### Part B: Deploy Frontend to Vercel (or Netlify / Cloudflare Pages)
 1. Sign in to [Vercel](https://vercel.com) (or Netlify).
@@ -89,8 +89,8 @@ npm run dev
    - **Build Command**: `npm run build`
    - **Output Directory**: `dist`
 4. In **Environment Variables**, add:
-   - `VITE_API_BASE_URL`: `https://zentra-backend.onrender.com/api` (your backend URL from Part A)
-   - `VITE_WS_URL`: `wss://zentra-backend.onrender.com/ws` (WebSocket URL from Part A)
+   - `VITE_API_BASE_URL`: `https://zentradigital.onrender.com/api` (or leave `/api` since `vercel.json` rewrites are configured)
+   - `VITE_WS_URL`: `wss://zentradigital.onrender.com/ws`
 5. Click **Deploy**. Your website is live worldwide on high-speed CDN!
 
 ---
