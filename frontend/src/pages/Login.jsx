@@ -10,7 +10,6 @@ import {
   ArrowRight,
   Check,
   AlertCircle,
-  Sparkles,
   X,
   CheckCircle2,
   Mail,
@@ -35,7 +34,6 @@ export default function Login() {
   // UI & Feedback State
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [quickUsers, setQuickUsers] = useState([]);
 
   // Interactive Brevo OTP Password Reset State
   const [showForgotModal, setShowForgotModal] = useState(false);
@@ -63,13 +61,6 @@ export default function Login() {
       navigate(target, { replace: true });
     }
   }, [user, token, authLoading, navigate, getDashboardPath]);
-
-  // Load real-time active users (for evaluation/quick switch)
-  useEffect(() => {
-    api.get('/auth/quick-users')
-      .then(res => setQuickUsers(res || []))
-      .catch(err => console.warn('No active quick-switch users found:', err.message));
-  }, []);
 
   // Validation Rules
   const isValidEmail = (val) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val.trim());
@@ -99,29 +90,6 @@ export default function Login() {
       setError(err.message || 'Invalid username or password.');
     } finally {
       setLoading(false);
-    }
-  };
-
-  // Quick Select from registered active users
-  const handleQuickSelect = async (u, autoLogin = false) => {
-    setIdentifier(u.username);
-    setPassword('Admin@123');
-    setTouched({ identifier: true, password: true });
-
-    if (autoLogin) {
-      setError('');
-      setLoading(true);
-      try {
-        const data = await login(u.username, 'Admin@123');
-        const target = getDashboardPath
-          ? getDashboardPath(data.user)
-          : (data.user.role_name === 'admin' ? '/admin' : (data.user.user_type === 'client' ? '/client' : '/employee'));
-        navigate(target, { replace: true });
-      } catch (err) {
-        setError(err.message || 'Failed to authenticate user.');
-      } finally {
-        setLoading(false);
-      }
     }
   };
 
@@ -415,32 +383,6 @@ export default function Login() {
             )}
           </button>
         </form>
-
-        {/* Registered Active Accounts (Displayed if accounts exist in MongoDB) */}
-        {quickUsers.length > 0 && (
-          <div className="auth-quick-persona-section">
-            <div className="auth-quick-persona-header">
-              <Sparkles size={13} color="#E50914" />
-              <span className="auth-quick-persona-title">
-                Registered Accounts
-              </span>
-            </div>
-            <div className="auth-quick-persona-grid">
-              {quickUsers.map(u => (
-                <button
-                  key={u.id}
-                  type="button"
-                  onClick={() => handleQuickSelect(u, true)}
-                  title={`Click to sign in as ${u.role_display || u.role_name}`}
-                  className={`auth-persona-chip ${identifier === u.username ? 'active' : ''}`}
-                >
-                  <span>{u.role_display || u.role_name}</span>
-                  <span style={{ fontSize: '10.5px', opacity: 0.65 }}>({u.username})</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* Footer Return Link */}
         <div className="auth-footer">
