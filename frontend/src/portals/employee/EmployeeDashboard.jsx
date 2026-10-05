@@ -46,7 +46,7 @@ export default function EmployeeDashboard() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <ShieldCheck size={18} color="#A5B4FC" />
             <span style={{ fontSize: '13px', color: '#E0E7FF', fontWeight: 600 }}>
-              Administrator RBAC Mode: Previewing Employee Role Dashboards
+              Administrator Workspace Preview
             </span>
           </div>
 

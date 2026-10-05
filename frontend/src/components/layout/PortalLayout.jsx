@@ -3,7 +3,6 @@ import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import api from '../../api/client';
-import QuickRoleSwitcher from '../common/QuickRoleSwitcher';
 import {
   LayoutDashboard, Users, UserCheck, Briefcase, Calendar, CheckSquare,
   FileText, MessageSquare, Bell, Settings, LogOut, Search, Clock,
@@ -236,9 +235,6 @@ export default function PortalLayout({ children }) {
 
   return (
     <div className="portal-container">
-      {/* 1-Click Interactive RBAC Persona Switcher Bar at Top */}
-      <QuickRoleSwitcher />
-
       {/* Backdrop overlay for mobile drawer */}
       {sidebarOpen && (
         <div
@@ -248,7 +244,7 @@ export default function PortalLayout({ children }) {
         />
       )}
 
-      <div className="portal-layout-body" style={{ display: 'flex', flex: 1, minHeight: 'calc(100vh - 45px)', width: '100%', position: 'relative' }}>
+      <div className="portal-layout-body" style={{ display: 'flex', flex: 1, minHeight: '100vh', width: '100%', position: 'relative' }}>
         {/* Sidebar Navigation (Off-canvas drawer on mobile, sticky on desktop) */}
         <aside className={`portal-sidebar ${sidebarOpen ? 'open' : ''}`}>
           {/* Logo / Brand Header */}
@@ -281,7 +277,7 @@ export default function PortalLayout({ children }) {
                   ZENTRA <span style={{ color: '#E50914' }}>OS</span>
                 </span>
                 <span style={{ display: 'block', fontSize: '9.5px', color: '#71717A', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                  RBAC Workflow Suite
+                  Enterprise Operations
                 </span>
               </div>
             </div>

@@ -253,7 +253,7 @@ export default function Employees() {
             <div className="modal-header">
               <div>
                 <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700 }}>
-                  Assign Employee Role (RBAC)
+                  Assign Employee Role
                 </h3>
                 <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '2px' }}>
                   {roleModalEmp.first_name} {roleModalEmp.last_name} ({roleModalEmp.employee_code})
