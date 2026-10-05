@@ -19,6 +19,6 @@ services:
       - key: BREVO_API_KEY
         sync: false
       - key: BREVO_SENDER_EMAIL
-        value: contact@zentradigital.agency
+        value: zentradigital.inr@gmail.com
       - key: BREVO_SENDER_NAME
         value: Zentra Digital Security

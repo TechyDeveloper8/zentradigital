@@ -25,8 +25,8 @@ export async function sendPasswordResetOtp({ toEmail, toName, otp, expiresInMinu
     };
   }
 
-  const senderEmail = process.env.BREVO_SENDER_EMAIL || 'contact@zentradigital.agency';
-  const senderName = process.env.BREVO_SENDER_NAME || 'Zentra Digital Security';
+  const senderEmail = process.env.BREVO_SENDER_EMAIL || 'zentradigital.inr@gmail.com';
+  const senderName = process.env.BREVO_SENDER_NAME || 'Zentra Digital ';
   const recipientName = toName || toEmail.split('@')[0];
 
   const htmlContent = `

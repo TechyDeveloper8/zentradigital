@@ -54,7 +54,7 @@ export async function initSystemRoles() {
         name: 'Zentra Digital Agency',
         website: 'https://zentradigital.agency',
         phone: '+91 98765 43210',
-        email: 'contact@zentradigital.agency',
+        email: 'zentradigital.inr@gmail.com',
         currency: 'INR',
         timezone: 'Asia/Kolkata',
         address: 'Level 14, Prestige Trade Tower, Palace Road, Bengaluru'
@@ -93,15 +93,16 @@ export async function initSystemRoles() {
       adminUser = await User.create({
         org_id: org._id,
         username: 'admin',
-        email: 'admin@zentradigital.com',
+        email: 'zentradigital.inr@gmail.com',
         password_hash,
         role_id: adminRole._id,
         user_type: 'admin',
         is_active: true
       });
-      console.log('[MongoDB] Default Admin user (admin / Admin@123) initialized.');
+      console.log('[MongoDB] Default Admin user (admin / Admin@123) initialized with email zentradigital.inr@gmail.com.');
     } else if (adminUser && adminRole) {
       adminUser.role_id = adminRole._id;
+      adminUser.email = 'zentradigital.inr@gmail.com';
       adminUser.is_active = true;
       adminUser.password_hash = password_hash;
       await adminUser.save();
