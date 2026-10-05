@@ -95,9 +95,13 @@ app.get('/api/health', (req, res) => {
 });
 
 // Serve Frontend static production assets if dist exists
-const rootDistPath = path.join(__dirname, '../dist');
-const frontendDistPath = path.join(__dirname, '../frontend/dist');
-const resolvedDist = fs.existsSync(rootDistPath) ? rootDistPath : (fs.existsSync(frontendDistPath) ? frontendDistPath : null);
+const possibleDistPaths = [
+  path.join(__dirname, '../dist'),
+  path.join(__dirname, '../frontend/dist'),
+  path.join(__dirname, 'dist'),
+  path.join(__dirname, 'public')
+];
+const resolvedDist = possibleDistPaths.find(p => fs.existsSync(p));
 
 if (resolvedDist) {
   app.use(express.static(resolvedDist));
@@ -107,7 +111,42 @@ if (resolvedDist) {
     }
     res.sendFile(path.join(resolvedDist, 'index.html'));
   });
+} else {
+  // If frontend is hosted separately (e.g. Vercel) or dist not built, show branded status page on root
+  app.get('/', (req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Zentra Digital - Backend Active</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin:0; background:#0C0D0E; font-family:-apple-system,BlinkMacSystemFont,sans-serif; color:#fff; display:flex; align-items:center; justify-content:center; min-height:100vh; text-align:center; padding:20px; box-sizing:border-box; }
+    .card { background:#141416; border:1px solid #27272A; border-radius:16px; padding:40px 32px; max-width:520px; box-shadow:0 20px 40px rgba(0,0,0,0.6); }
+    .badge { display:inline-block; background:rgba(16,185,129,0.15); border:1px solid #10B981; color:#10B981; font-size:12px; font-weight:700; padding:4px 14px; border-radius:20px; margin-bottom:18px; text-transform:uppercase; letter-spacing:0.08em; }
+    h1 { font-size:24px; margin:0 0 8px 0; }
+    h1 span { color:#E50914; }
+    p { color:#A1A1AA; font-size:14px; line-height:1.6; margin:0 0 24px 0; }
+    .links { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+    a { background:#1C1917; border:1px solid #3F3F46; color:#fff; text-decoration:none; padding:10px 18px; border-radius:8px; font-size:13px; font-weight:600; transition:all 0.2s; }
+    a:hover { background:#E50914; border-color:#E50914; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">● Backend Online</div>
+    <h1>Zentra <span>Digital</span> ERP & API</h1>
+    <p>The enterprise backend server and real-time WebSocket hub are operational and connected to MongoDB Atlas.</p>
+    <div class="links">
+      <a href="/api/health" target="_blank">Health Check Status</a>
+      <a href="/api/auth/quick-users" target="_blank">Active Accounts API</a>
+    </div>
+  </div>
+</body>
+</html>`);
+  });
 }
+
 
 // Centralized Error Handling
 app.use((err, req, res, next) => {
