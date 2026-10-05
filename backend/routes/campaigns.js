@@ -1,118 +1,144 @@
 import express from 'express';
-import db, { logAudit } from '../db/database.js';
+import mongoose from 'mongoose';
+import { Campaign, Client, ContentItem } from '../models/index.js';
+import { logAudit } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // List Campaigns
-router.get('/', authenticate, (req, res) => {
-  const { client_id, status } = req.query;
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const { client_id, status } = req.query;
 
-  let sql = `
-    SELECT c.*, cl.company_name, cl.client_code,
-           m.first_name || ' ' || m.last_name as manager_name,
-           (SELECT COUNT(*) FROM content_items WHERE campaign_id = c.id) as content_count
-    FROM campaigns c
-    JOIN clients cl ON c.client_id = cl.id
-    LEFT JOIN employees m ON c.assigned_manager_id = m.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const query = {};
 
-  if (req.user.user_type === 'client') {
-    sql += ` AND cl.user_id = ?`;
-    params.push(req.user.id);
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) return res.json([]);
+      query.client_id = client._id;
+    }
+
+    if (client_id && mongoose.Types.ObjectId.isValid(client_id)) {
+      query.client_id = client_id;
+    }
+    if (status) query.status = status;
+
+    const campaigns = await Campaign.find(query)
+      .populate('client_id')
+      .sort({ created_at: -1 });
+
+    const campIds = campaigns.map(c => c._id);
+    const contentCounts = await ContentItem.aggregate([
+      { $match: { campaign_id: { $in: campIds } } },
+      { $group: { _id: '$campaign_id', count: { $sum: 1 } } }
+    ]);
+    const countMap = new Map(contentCounts.map(cc => [cc._id.toString(), cc.count]));
+
+    const formatted = campaigns.map(c => {
+      const cl = c.client_id;
+      return {
+        ...c.toJSON(),
+        campaign_name: c.name,
+        company_name: cl?.company_name || '',
+        client_code: cl?.client_code || '',
+        manager_name: '',
+        content_count: countMap.get(c._id.toString()) || 0
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error listing campaigns:', err);
+    res.status(500).json({ error: 'Failed to retrieve campaigns.' });
   }
-
-  if (client_id) {
-    sql += ` AND c.client_id = ?`;
-    params.push(client_id);
-  }
-  if (status) {
-    sql += ` AND c.status = ?`;
-    params.push(status);
-  }
-
-  sql += ` ORDER BY c.id DESC`;
-  const campaigns = db.prepare(sql).all(...params);
-  res.json(campaigns);
 });
 
-// Create Campaign (Section 35)
-router.post('/', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const {
-    campaign_name, client_id, objective, platform, start_date, end_date,
-    budget, target_audience, location, age_range, gender, creative_requirements,
-    landing_page, assigned_manager_id, status
-  } = req.body;
+// Create Campaign
+router.post('/', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    const {
+      campaign_name, name, client_id, objective, platform, start_date, end_date,
+      budget, target_audience, status
+    } = req.body;
 
-  if (!campaign_name || !client_id || !start_date) {
-    return res.status(400).json({ error: 'Campaign name, client, and start date are required.' });
+    const finalName = campaign_name || name;
+    if (!finalName || !client_id || !start_date) {
+      return res.status(400).json({ error: 'Campaign name, client, and start date are required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(client_id)) {
+      return res.status(400).json({ error: 'Invalid client ID.' });
+    }
+
+    const newCamp = await Campaign.create({
+      name: finalName,
+      client_id,
+      objective: objective || 'Brand Awareness',
+      platforms: platform ? (Array.isArray(platform) ? platform : [platform]) : ['Meta (Instagram & Facebook)'],
+      start_date: new Date(start_date),
+      end_date: end_date ? new Date(end_date) : null,
+      budget: Number(budget) || 0,
+      target_audience: target_audience || '',
+      status: status || 'PLANNING'
+    });
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'CREATED',
+      entity: 'campaigns',
+      entityId: newCamp._id,
+      newValue: { campaign_name: newCamp.name, client_id, budget },
+      ip: req.ip
+    });
+
+    res.status(201).json({
+      message: 'Campaign created successfully',
+      campaign: { ...newCamp.toJSON(), campaign_name: newCamp.name }
+    });
+  } catch (err) {
+    console.error('Error creating campaign:', err);
+    res.status(500).json({ error: 'Failed to create campaign.' });
   }
-
-  const mgrId = assigned_manager_id || (req.employee ? req.employee.id : null);
-
-  const result = db.prepare(`
-    INSERT INTO campaigns (
-      campaign_name, client_id, objective, platform, start_date, end_date,
-      budget, target_audience, location, age_range, gender, creative_requirements,
-      landing_page, assigned_manager_id, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    campaign_name, client_id, objective || 'Brand Awareness', platform || 'Meta (Instagram & Facebook)',
-    start_date, end_date || null, Number(budget) || 0, target_audience || '', location || '',
-    age_range || '18-45', gender || 'All', creative_requirements || '', landing_page || '',
-    mgrId, status || 'PLANNED'
-  );
-
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'campaigns',
-    entityId: result.lastInsertRowid,
-    newValue: { campaign_name, client_id, budget },
-    ip: req.ip
-  });
-
-  const created = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(result.lastInsertRowid);
-  res.status(201).json({ message: 'Campaign created successfully', campaign: created });
 });
 
 // Update Campaign
-router.put('/:id', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
-  if (!campaign) {
-    return res.status(404).json({ error: 'Campaign not found' });
+router.put('/:id', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    const camp = await Campaign.findById(req.params.id);
+    if (!camp) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    const {
+      campaign_name, name, objective, platform, start_date, end_date, budget, spent,
+      target_audience, status
+    } = req.body;
+
+    if (campaign_name || name) camp.name = campaign_name || name;
+    if (objective !== undefined) camp.objective = objective;
+    if (platform !== undefined) camp.platforms = Array.isArray(platform) ? platform : [platform];
+    if (start_date !== undefined) camp.start_date = new Date(start_date);
+    if (end_date !== undefined) camp.end_date = end_date ? new Date(end_date) : null;
+    if (budget !== undefined) camp.budget = Number(budget);
+    if (spent !== undefined) camp.spent_amount = Number(spent);
+    if (target_audience !== undefined) camp.target_audience = target_audience;
+    if (status !== undefined) camp.status = status;
+
+    await camp.save();
+
+    res.json({
+      message: 'Campaign updated successfully',
+      campaign: { ...camp.toJSON(), campaign_name: camp.name }
+    });
+  } catch (err) {
+    console.error('Error updating campaign:', err);
+    res.status(500).json({ error: 'Failed to update campaign.' });
   }
-
-  const {
-    campaign_name, objective, platform, start_date, end_date, budget, spent,
-    target_audience, location, age_range, gender, status
-  } = req.body;
-
-  db.prepare(`
-    UPDATE campaigns SET
-      campaign_name = coalesce(?, campaign_name),
-      objective = coalesce(?, objective),
-      platform = coalesce(?, platform),
-      start_date = coalesce(?, start_date),
-      end_date = coalesce(?, end_date),
-      budget = coalesce(?, budget),
-      spent = coalesce(?, spent),
-      target_audience = coalesce(?, target_audience),
-      location = coalesce(?, location),
-      age_range = coalesce(?, age_range),
-      gender = coalesce(?, gender),
-      status = coalesce(?, status),
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    campaign_name, objective, platform, start_date, end_date, budget, spent,
-    target_audience, location, age_range, gender, status, campaign.id
-  );
-
-  const updated = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(campaign.id);
-  res.json({ message: 'Campaign updated successfully', campaign: updated });
 });
 
 export default router;

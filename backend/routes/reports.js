@@ -1,184 +1,266 @@
 import express from 'express';
-import db, { logAudit } from '../db/database.js';
+import {
+  Lead, Client, Project, Task, AttendanceRecord, Employee,
+  ContentItem, ContentPerformance, ClientRequest, Campaign,
+  Payment, Invoice, Contract, ClientReport
+} from '../models/index.js';
+import { logAudit } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Admin Operational & Executive Analytics (Section 5, 28, 39)
-// STRICT RULE: All metrics calculated directly from database records, ZERO mock data.
-router.get('/admin', authenticate, requireRole(['admin']), (req, res) => {
-  // 1. Leads & Sales Analytics
-  const totalLeads = db.prepare('SELECT COUNT(*) as count FROM leads').get().count;
-  const newLeads = db.prepare("SELECT COUNT(*) as count FROM leads WHERE status = 'NEW'").get().count;
-  const convertedLeads = db.prepare("SELECT COUNT(*) as count FROM leads WHERE status = 'WON'").get().count;
-  const conversionRate = totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
+function getTodayDate() {
+  return new Date().toISOString().split('T')[0];
+}
 
-  const leadsBySource = db.prepare(`
-    SELECT source, COUNT(*) as count FROM leads GROUP BY source
-  `).all();
+// Admin Operational & Executive Analytics
+router.get('/admin', authenticate, requireRole(['admin']), async (req, res) => {
+  try {
+    const today = getTodayDate();
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-  // 2. Clients Analytics
-  const totalClients = db.prepare('SELECT COUNT(*) as count FROM clients').get().count;
-  const activeClients = db.prepare("SELECT COUNT(*) as count FROM clients WHERE status = 'ACTIVE'").get().count;
-  const onboardingClients = db.prepare("SELECT COUNT(*) as count FROM clients WHERE status = 'ONBOARDING'").get().count;
+    const threeDaysLaterDate = new Date();
+    threeDaysLaterDate.setDate(now.getDate() + 3);
+    const threeDaysLater = threeDaysLaterDate.toISOString().split('T')[0];
 
-  // 3. Projects & Tasks
-  const activeProjects = db.prepare("SELECT COUNT(*) as count FROM projects WHERE status = 'ACTIVE'").get().count;
-  const pendingTasks = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status != 'COMPLETED'").get().count;
-  const overdueTasks = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE due_date < DATE('now') AND status != 'COMPLETED'").get().count;
+    // 1. Leads & Sales Analytics
+    const totalLeads = await Lead.countDocuments();
+    const newLeads = await Lead.countDocuments({ status: 'NEW' });
+    const convertedLeads = await Lead.countDocuments({ status: 'WON' });
+    const conversionRate = totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
 
-  // 4. Attendance Today
-  const today = new Date().toISOString().split('T')[0];
-  const attendanceToday = db.prepare(`
-    SELECT COUNT(*) as count FROM attendance_records
-    WHERE date = ? AND status IN ('PRESENT', 'LATE', 'HALF DAY')
-  `).get(today).count;
+    const leadsBySourceRaw = await Lead.aggregate([
+      { $group: { _id: '$source', count: { $sum: 1 } } }
+    ]);
+    const leadsBySource = leadsBySourceRaw.map(s => ({
+      source: s._id || 'Unknown',
+      count: s.count
+    }));
 
-  const totalActiveEmployees = db.prepare("SELECT COUNT(*) as count FROM employees WHERE employment_status IN ('Active', 'Probation')").get().count;
-  const employeesAbsent = Math.max(0, totalActiveEmployees - attendanceToday);
+    // 2. Clients Analytics
+    const totalClients = await Client.countDocuments();
+    const activeClients = await Client.countDocuments({ status: 'ACTIVE' });
+    const onboardingClients = await Client.countDocuments({ status: 'ONBOARDING' });
 
-  // 5. Creative & Review Queues
-  const clientApprovalsPending = db.prepare("SELECT COUNT(*) as count FROM content_items WHERE workflow_stage = 'CLIENT_REVIEW'").get().count;
-  const creativesInternalReview = db.prepare("SELECT COUNT(*) as count FROM content_items WHERE workflow_stage = 'INTERNAL_REVIEW'").get().count;
-  const clientRequestsPending = db.prepare("SELECT COUNT(*) as count FROM client_requests WHERE status NOT IN ('COMPLETED', 'CLOSED')").get().count;
+    // 3. Projects & Tasks
+    const activeProjects = await Project.countDocuments({ status: 'ACTIVE' });
+    const pendingTasks = await Task.countDocuments({ status: { $ne: 'COMPLETED' } });
+    const overdueTasks = await Task.countDocuments({ due_date: { $lt: today }, status: { $ne: 'COMPLETED' } });
 
-  // 6. Content Scheduled & Published
-  const contentScheduledToday = db.prepare("SELECT COUNT(*) as count FROM content_items WHERE publish_date = ? AND workflow_stage IN ('APPROVED', 'SCHEDULED')").get(today).count;
-  const contentPublished = db.prepare("SELECT COUNT(*) as count FROM content_items WHERE workflow_stage = 'PUBLISHED'").get().count;
-  const openCampaigns = db.prepare("SELECT COUNT(*) as count FROM campaigns WHERE status = 'ACTIVE'").get().count;
+    // 4. Attendance Today
+    const attendanceToday = await AttendanceRecord.countDocuments({
+      date: today,
+      status: { $in: ['PRESENT', 'LATE', 'HALF DAY', 'HALF_DAY'] }
+    });
+    const totalActiveEmployees = await Employee.countDocuments({
+      employment_status: { $in: ['Active', 'Probation'] }
+    });
+    const employeesAbsent = Math.max(0, totalActiveEmployees - attendanceToday);
 
-  // 7. Financial Metrics
-  const monthlyRevenue = db.prepare(`
-    SELECT COALESCE(SUM(amount), 0) as total FROM payments
-    WHERE strftime('%Y-%m', payment_date) = strftime('%Y-%m', 'now')
-  `).get().total;
+    // 5. Creative & Review Queues
+    const clientApprovalsPending = await ContentItem.countDocuments({ workflow_stage: 'CLIENT_REVIEW' });
+    const creativesInternalReview = await ContentItem.countDocuments({ workflow_stage: 'INTERNAL_REVIEW' });
+    const clientRequestsPending = await ClientRequest.countDocuments({ status: { $nin: ['COMPLETED', 'CLOSED'] } });
 
-  const outstandingPayments = db.prepare(`
-    SELECT COALESCE(SUM(total - paid_amount), 0) as total FROM invoices
-    WHERE payment_status IN ('UNPAID', 'PARTIAL', 'OVERDUE')
-  `).get().total;
+    // 6. Content Scheduled & Published
+    const contentScheduledToday = await ContentItem.countDocuments({
+      publish_date: today,
+      workflow_stage: { $in: ['APPROVED', 'SCHEDULED'] }
+    });
+    const contentPublished = await ContentItem.countDocuments({ workflow_stage: 'PUBLISHED' });
+    const openCampaigns = await Campaign.countDocuments({ status: 'ACTIVE' });
 
-  const mrr = db.prepare(`
-    SELECT COALESCE(SUM(monthly_amount), 0) as total FROM contracts WHERE status = 'ACTIVE'
-  `).get().total;
+    // 7. Financial Metrics
+    const paymentSum = await Payment.aggregate([
+      {
+        $match: {
+          payment_date: { $gte: startOfMonth, $lte: endOfMonth }
+        }
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const monthlyRevenue = paymentSum[0]?.total || 0;
 
-  // 8. Upcoming Deadlines (within 3 days)
-  const upcomingDeadlines = db.prepare(`
-    SELECT t.id, t.task_code, t.task_title, t.due_date, t.priority, c.company_name
-    FROM tasks t
-    JOIN clients c ON t.client_id = c.id
-    WHERE t.status != 'COMPLETED' AND t.due_date BETWEEN DATE('now') AND DATE('now', '+3 days')
-    ORDER BY t.due_date ASC LIMIT 5
-  `).all();
+    const invoices = await Invoice.find({
+      payment_status: { $in: ['UNPAID', 'PARTIAL', 'OVERDUE'] }
+    }).lean();
+    const outstandingPayments = invoices.reduce((sum, inv) => sum + Math.max(0, (inv.total || 0) - (inv.paid_amount || 0)), 0);
 
-  res.json({
-    metrics: {
-      total_leads: totalLeads,
-      new_leads: newLeads,
-      converted_leads: convertedLeads,
-      conversion_rate: conversionRate,
-      total_clients: totalClients,
-      active_clients: activeClients,
-      onboarding_clients: onboardingClients,
-      active_projects: activeProjects,
-      pending_tasks: pendingTasks,
-      overdue_tasks: overdueTasks,
-      attendance_today: attendanceToday,
-      employees_absent: employeesAbsent,
-      client_requests_pending: clientRequestsPending,
-      creatives_internal_review: creativesInternalReview,
-      client_approvals_pending: clientApprovalsPending,
-      content_scheduled_today: contentScheduledToday,
-      content_published: contentPublished,
-      open_campaigns: openCampaigns,
-      monthly_revenue: monthlyRevenue,
-      outstanding_payments: outstandingPayments,
-      mrr: mrr
-    },
-    leadsBySource,
-    upcomingDeadlines
-  });
+    const contractSum = await Contract.aggregate([
+      { $match: { status: 'ACTIVE' } },
+      { $group: { _id: null, total: { $sum: '$monthly_amount' } } }
+    ]);
+    const clientRetainerSum = await Client.aggregate([
+      { $match: { status: 'ACTIVE' } },
+      { $group: { _id: null, total: { $sum: '$monthly_retainer_fee' } } }
+    ]);
+    const mrr = contractSum[0]?.total || clientRetainerSum[0]?.total || 0;
+
+    // 8. Upcoming Deadlines (within 3 days)
+    const upcomingDeadlinesRaw = await Task.find({
+      status: { $ne: 'COMPLETED' },
+      due_date: { $gte: today, $lte: threeDaysLater }
+    })
+      .populate('client_id', 'company_name')
+      .sort({ due_date: 1 })
+      .limit(5)
+      .lean({ virtuals: true });
+
+    const upcomingDeadlines = upcomingDeadlinesRaw.map(t => ({
+      id: t._id.toString(),
+      task_code: t.task_code,
+      task_title: t.task_title || t.title,
+      due_date: t.due_date,
+      priority: t.priority,
+      company_name: t.client_id?.company_name || null
+    }));
+
+    res.json({
+      metrics: {
+        total_leads: totalLeads,
+        new_leads: newLeads,
+        converted_leads: convertedLeads,
+        conversion_rate: conversionRate,
+        total_clients: totalClients,
+        active_clients: activeClients,
+        onboarding_clients: onboardingClients,
+        active_projects: activeProjects,
+        pending_tasks: pendingTasks,
+        overdue_tasks: overdueTasks,
+        attendance_today: attendanceToday,
+        employees_absent: employeesAbsent,
+        client_requests_pending: clientRequestsPending,
+        creatives_internal_review: creativesInternalReview,
+        client_approvals_pending: clientApprovalsPending,
+        content_scheduled_today: contentScheduledToday,
+        content_published: contentPublished,
+        open_campaigns: openCampaigns,
+        monthly_revenue: monthlyRevenue,
+        outstanding_payments: outstandingPayments,
+        mrr: mrr
+      },
+      leadsBySource,
+      upcomingDeadlines
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// Client Monthly Performance Reports (Section 36)
-router.get('/client-reports', authenticate, (req, res) => {
-  const { client_id } = req.query;
+// Client Monthly Performance Reports
+router.get('/client-reports', authenticate, async (req, res) => {
+  try {
+    const { client_id } = req.query;
+    const filter = {};
 
-  let sql = `
-    SELECT cr.*, c.company_name, c.client_code,
-           u.username as finalized_by_user
-    FROM client_reports cr
-    JOIN clients c ON cr.client_id = c.id
-    LEFT JOIN users u ON cr.finalized_by = u.id
-    WHERE 1=1
-  `;
-  const params = [];
+    if (req.user.user_type === 'client') {
+      const activeClient = req.client || req.clientProfile;
+      if (activeClient) {
+        filter.client_id = activeClient._id || activeClient.id;
+      }
+      filter.status = 'FINALIZED';
+    } else if (client_id) {
+      filter.client_id = client_id;
+    }
 
-  if (req.user.user_type === 'client') {
-    sql += ` AND c.user_id = ? AND cr.status = 'FINALIZED'`;
-    params.push(req.user.id);
-  } else if (client_id) {
-    sql += ` AND cr.client_id = ?`;
-    params.push(client_id);
+    const reportsRaw = await ClientReport.find(filter)
+      .populate('client_id', 'company_name client_code')
+      .populate('finalized_by', 'username')
+      .sort({ report_year: -1, report_month: -1, _id: -1 })
+      .lean({ virtuals: true });
+
+    const reports = reportsRaw.map(cr => ({
+      ...cr,
+      id: cr._id.toString(),
+      client_id: cr.client_id?._id ? cr.client_id._id.toString() : cr.client_id,
+      company_name: cr.client_id?.company_name || null,
+      client_code: cr.client_id?.client_code || null,
+      finalized_by_user: cr.finalized_by?.username || null
+    }));
+
+    res.json(reports);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  sql += ` ORDER BY cr.report_year DESC, cr.report_month DESC`;
-  const reports = db.prepare(sql).all(...params);
-  res.json(reports);
 });
 
 // Generate / Save Client Monthly Report
-router.post('/client-reports', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const {
-    client_id, report_month, report_year, title, work_completed,
-    best_content_summary, recommendations, upcoming_plan, status
-  } = req.body;
-
-  if (!client_id || !report_month || !report_year || !title) {
-    return res.status(400).json({ error: 'Client, month, year, and report title are required.' });
-  }
-
-  // Calculate live numbers from database for this month
-  const monthStr = `${report_year}-${String(report_month).padStart(2, '0')}`;
-
-  const publishedCount = db.prepare(`
-    SELECT COUNT(*) as count FROM content_items
-    WHERE client_id = ? AND workflow_stage = 'PUBLISHED' AND strftime('%Y-%m', publish_date) = ?
-  `).get(client_id, monthStr).count;
-
-  const perf = db.prepare(`
-    SELECT COALESCE(SUM(reach), 0) as reach,
-           COALESCE(SUM(likes + comments + shares + saves), 0) as engagement,
-           COALESCE(SUM(leads_count), 0) as leads
-    FROM content_performance
-    WHERE client_id = ? AND strftime('%Y-%m', recorded_date) = ?
-  `).get(client_id, monthStr);
-
-  const result = db.prepare(`
-    INSERT INTO client_reports (
+router.post('/client-reports', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    const {
       client_id, report_month, report_year, title, work_completed,
-      content_published_count, reach_total, engagement_total, leads_generated,
-      best_content_summary, recommendations, upcoming_plan, status,
-      finalized_by, finalized_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    client_id, report_month, report_year, title, work_completed || '',
-    publishedCount, perf.reach, perf.engagement, perf.leads,
-    best_content_summary || '', recommendations || '', upcoming_plan || '',
-    status || 'DRAFT', status === 'FINALIZED' ? req.user.id : null,
-    status === 'FINALIZED' ? new Date().toISOString() : null
-  );
+      best_content_summary, recommendations, upcoming_plan, status
+    } = req.body;
 
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'client_reports',
-    entityId: result.lastInsertRowid,
-    newValue: { client_id, title, month: monthStr },
-    ip: req.ip
-  });
+    if (!client_id || !report_month || !report_year || !title) {
+      return res.status(400).json({ error: 'Client, month, year, and report title are required.' });
+    }
 
-  res.status(201).json({ message: 'Client monthly report created successfully' });
+    const monthStr = `${report_year}-${String(report_month).padStart(2, '0')}`;
+
+    const publishedCount = await ContentItem.countDocuments({
+      client_id,
+      workflow_stage: 'PUBLISHED',
+      publish_date: { $regex: `^${monthStr}` }
+    });
+
+    const perfAgg = await ContentPerformance.aggregate([
+      {
+        $match: {
+          client_id: client_id,
+          recorded_date: { $regex: `^${monthStr}` }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          reach: { $sum: '$reach' },
+          engagement: { $sum: { $add: ['$likes', '$comments', '$shares', '$saves'] } },
+          leads: { $sum: '$leads_count' }
+        }
+      }
+    ]);
+
+    const reach = perfAgg[0]?.reach || 0;
+    const engagement = perfAgg[0]?.engagement || 0;
+    const leads = perfAgg[0]?.leads || 0;
+
+    const report = await ClientReport.create({
+      client_id,
+      report_month: Number(report_month),
+      report_year: Number(report_year),
+      title,
+      work_completed: work_completed || '',
+      content_published_count: publishedCount,
+      reach_total: reach,
+      engagement_total: engagement,
+      leads_generated: leads,
+      best_content_summary: best_content_summary || '',
+      recommendations: recommendations || '',
+      upcoming_plan: upcoming_plan || '',
+      status: status || 'DRAFT',
+      finalized_by: status === 'FINALIZED' ? (req.user._id || req.user.id) : null,
+      finalized_at: status === 'FINALIZED' ? new Date() : null
+    });
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'CREATED',
+      entity: 'client_reports',
+      entityId: report._id || report.id,
+      newValue: { client_id, title, month: monthStr },
+      ip: req.ip
+    });
+
+    res.status(201).json({
+      message: 'Client monthly report created successfully',
+      report_id: (report._id || report.id).toString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

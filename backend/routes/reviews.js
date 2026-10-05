@@ -1,254 +1,253 @@
 import express from 'express';
-import db, { logAudit, createNotification, recordWorkflowHistory } from '../db/database.js';
+import mongoose from 'mongoose';
+import { ContentItem, ContentReview, Client, Employee } from '../models/index.js';
+import { logAudit, createNotification, recordWorkflowHistory } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // List Pending Reviews (Manager or Client)
-router.get('/pending', authenticate, (req, res) => {
-  let sql = `
-    SELECT ci.*, c.company_name, c.client_code,
-           p.project_name,
-           ed.first_name || ' ' || ed.last_name as editor_name,
-           cv.preview_url as current_preview_url,
-           cv.file_name as current_file_name,
-           cv.version_number
-    FROM content_items ci
-    JOIN clients c ON ci.client_id = c.id
-    LEFT JOIN projects p ON ci.project_id = p.id
-    LEFT JOIN employees ed ON ci.assigned_editor_id = ed.id
-    LEFT JOIN content_versions cv ON cv.content_id = ci.id AND cv.version_number = ci.current_version
-    WHERE 1=1
-  `;
-  const params = [];
+router.get('/pending', authenticate, async (req, res) => {
+  try {
+    const query = {};
 
-  if (req.user.user_type === 'client') {
-    // Client sees items waiting for client review
-    sql += ` AND c.user_id = ? AND ci.workflow_stage = 'CLIENT_REVIEW'`;
-    params.push(req.user.id);
-  } else {
-    // Internal team sees items waiting for internal review or client review
-    sql += ` AND ci.workflow_stage IN ('INTERNAL_REVIEW', 'CLIENT_REVIEW')`;
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) {
+        return res.json([]);
+      }
+      query.client_id = client._id;
+      query.workflow_stage = { $in: ['CLIENT REVIEW', 'CLIENT_REVIEW'] };
+    } else {
+      query.workflow_stage = { $in: ['INTERNAL REVIEW', 'INTERNAL_REVIEW', 'CLIENT REVIEW', 'CLIENT_REVIEW'] };
+    }
+
+    const items = await ContentItem.find(query)
+      .populate('client_id')
+      .populate('assigned_creator_id')
+      .sort({ scheduled_date: 1 });
+
+    const formatted = items.map(ci => {
+      const c = ci.client_id;
+      const ed = ci.assigned_creator_id;
+      const lastVersion = ci.versions && ci.versions.length > 0 ? ci.versions[ci.versions.length - 1] : null;
+
+      return {
+        ...ci.toJSON(),
+        company_name: c?.company_name || '',
+        client_code: c?.client_code || '',
+        editor_name: ed ? `${ed.first_name} ${ed.last_name}` : '',
+        current_preview_url: lastVersion?.asset_url || ci.media_url || '',
+        version_number: lastVersion?.version_number || 1
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error fetching pending reviews:', err);
+    res.status(500).json({ error: 'Failed to retrieve pending reviews.' });
   }
-
-  sql += ` ORDER BY ci.publish_date ASC`;
-  const pending = db.prepare(sql).all(...params);
-  res.json(pending);
 });
 
-// Internal Review Action (Manager/Admin approves to send to Client OR requests revision)
-router.post('/internal/:contentId', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const contentId = req.params.contentId;
-  const { action, reason, comment } = req.body; // 'APPROVE' or 'REQUEST_CHANGES'
+// Internal Review Action
+router.post('/internal/:contentId', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    const { contentId } = req.params;
+    const { action, reason, comment } = req.body; // 'APPROVE' or 'REQUEST_CHANGES'
 
-  const content = db.prepare('SELECT * FROM content_items WHERE id = ?').get(contentId);
-  if (!content) {
-    return res.status(404).json({ error: 'Content item not found' });
-  }
+    if (!mongoose.Types.ObjectId.isValid(contentId)) {
+      return res.status(404).json({ error: 'Content item not found' });
+    }
 
-  const reviewTransaction = db.transaction(() => {
-    // Record review
-    db.prepare(`
-      INSERT INTO content_reviews (
-        content_id, version_number, reviewer_user_id, reviewer_type, action, reason, comment
-      ) VALUES (?, ?, ?, 'INTERNAL', ?, ?, ?)
-    `).run(contentId, content.current_version, req.user.id, action, reason || '', comment || '');
+    const content = await ContentItem.findById(contentId);
+    if (!content) {
+      return res.status(404).json({ error: 'Content item not found' });
+    }
 
+    await ContentReview.create({
+      content_id: content._id,
+      reviewer_id: req.user._id,
+      review_stage: 'INTERNAL',
+      decision: action === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED',
+      feedback: comment || reason || ''
+    });
+
+    const prevStage = content.workflow_stage;
     if (action === 'APPROVE') {
-      // Advance to CLIENT_REVIEW
-      db.prepare(`
-        UPDATE content_items SET
-          internal_approval_status = 'APPROVED',
-          workflow_stage = 'CLIENT_REVIEW',
-          client_approval_status = 'PENDING',
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(contentId);
+      content.workflow_stage = 'CLIENT_REVIEW';
+      content.review_status = 'APPROVED_INTERNAL';
+      await content.save();
 
-      recordWorkflowHistory({
+      await recordWorkflowHistory({
         entityType: 'content',
-        entityId: contentId,
-        previousStage: 'INTERNAL_REVIEW',
+        entityId: content._id,
+        previousStage: prevStage,
         newStage: 'CLIENT_REVIEW',
         changedBy: req.user.id,
         remarks: 'Approved internally by marketing manager, sent to client for approval'
       });
 
-      // Notify Client user if linked
-      const client = db.prepare('SELECT user_id, company_name FROM clients WHERE id = ?').get(content.client_id);
+      const client = await Client.findById(content.client_id);
       if (client && client.user_id) {
-        createNotification({
+        await createNotification({
           userId: client.user_id,
           type: 'CLIENT_REVIEW_REQUESTED',
           title: 'New Creative Waiting for Approval',
-          message: `Your agency team submitted "${content.topic}" for review and approval.`,
+          message: `Your agency team submitted "${content.title}" for review and approval.`,
           relatedEntity: 'content_items',
-          relatedEntityId: contentId
+          relatedEntityId: content._id
         });
       }
     } else {
-      // Revert to REVISION for editor
-      db.prepare(`
-        UPDATE content_items SET
-          internal_approval_status = 'REVISION_REQUESTED',
-          workflow_stage = 'REVISION',
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(contentId);
+      content.workflow_stage = 'REVISION';
+      content.review_status = 'REVISION_REQUESTED';
+      content.admin_feedback = comment || reason || '';
+      await content.save();
 
-      recordWorkflowHistory({
+      await recordWorkflowHistory({
         entityType: 'content',
-        entityId: contentId,
-        previousStage: 'INTERNAL_REVIEW',
+        entityId: content._id,
+        previousStage: prevStage,
         newStage: 'REVISION',
         changedBy: req.user.id,
         remarks: `Internal revision requested: ${comment || reason}`
       });
 
-      if (content.assigned_editor_id) {
-        const editor = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(content.assigned_editor_id);
-        if (editor) {
-          createNotification({
+      if (content.assigned_creator_id) {
+        const editor = await Employee.findById(content.assigned_creator_id);
+        if (editor && editor.user_id) {
+          await createNotification({
             userId: editor.user_id,
             type: 'REVISION_REQUESTED',
             title: 'Internal Revision Requested',
-            message: `Manager requested changes for "${content.topic}": ${comment || reason}`,
+            message: `Manager requested changes for "${content.title}": ${comment || reason}`,
             relatedEntity: 'content_items',
-            relatedEntityId: contentId
+            relatedEntityId: content._id
           });
         }
       }
     }
-  });
 
-  reviewTransaction();
+    await logAudit({
+      userId: req.user.id,
+      action: action === 'APPROVE' ? 'APPROVED' : 'REVISION_REQUESTED',
+      entity: 'content_items',
+      entityId: content._id,
+      newValue: { reviewer: 'INTERNAL', action, comment },
+      ip: req.ip
+    });
 
-  logAudit({
-    userId: req.user.id,
-    action: action === 'APPROVE' ? 'APPROVED' : 'REVISION_REQUESTED',
-    entity: 'content_items',
-    entityId: contentId,
-    newValue: { reviewer: 'INTERNAL', action, comment },
-    ip: req.ip
-  });
-
-  const updated = db.prepare('SELECT * FROM content_items WHERE id = ?').get(contentId);
-  res.json({ message: `Internal review submitted: ${action}`, content: updated });
+    res.json({ message: `Internal review submitted: ${action}`, content: content.toJSON() });
+  } catch (err) {
+    console.error('Error in internal review:', err);
+    res.status(500).json({ error: 'Failed to process internal review.' });
+  }
 });
 
-// Client Review Action (Section 21: Client APPROVE or REQUEST_CHANGES)
-router.post('/client/:contentId', authenticate, (req, res) => {
-  const contentId = req.params.contentId;
-  const { action, reason, comment, specific_change, priority, attachment_url } = req.body;
+// Client Review Action
+router.post('/client/:contentId', authenticate, async (req, res) => {
+  try {
+    const { contentId } = req.params;
+    const { action, reason, comment, specific_change, priority } = req.body;
 
-  const content = db.prepare('SELECT * FROM content_items WHERE id = ?').get(contentId);
-  if (!content) {
-    return res.status(404).json({ error: 'Content item not found' });
-  }
-
-  // Verify client owns this item if client user
-  if (req.user.user_type === 'client') {
-    const client = db.prepare('SELECT id FROM clients WHERE user_id = ?').get(req.user.id);
-    if (!client || client.id !== content.client_id) {
-      return res.status(403).json({ error: 'Access denied: You can only review your own content.' });
+    if (!mongoose.Types.ObjectId.isValid(contentId)) {
+      return res.status(404).json({ error: 'Content item not found' });
     }
-  }
 
-  const reviewTransaction = db.transaction(() => {
-    // 1. Record Review
-    db.prepare(`
-      INSERT INTO content_reviews (
-        content_id, version_number, reviewer_user_id, reviewer_type, action,
-        reason, comment, specific_change, attachment_url, priority
-      ) VALUES (?, ?, ?, 'CLIENT', ?, ?, ?, ?, ?, ?)
-    `).run(
-      contentId, content.current_version, req.user.id, action,
-      reason || '', comment || '', specific_change || '', attachment_url || null, priority || 'MEDIUM'
-    );
+    const content = await ContentItem.findById(contentId);
+    if (!content) {
+      return res.status(404).json({ error: 'Content item not found' });
+    }
 
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client || client._id.toString() !== content.client_id.toString()) {
+        return res.status(403).json({ error: 'Access denied: You can only review your own content.' });
+      }
+    }
+
+    await ContentReview.create({
+      content_id: content._id,
+      reviewer_id: req.user._id,
+      review_stage: 'CLIENT',
+      decision: action === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED',
+      feedback: specific_change || comment || reason || ''
+    });
+
+    const prevStage = content.workflow_stage;
     if (action === 'APPROVE') {
-      // 2. Client Approved -> eligible for scheduling / publishing
-      db.prepare(`
-        UPDATE content_items SET
-          client_approval_status = 'APPROVED',
-          workflow_stage = 'APPROVED',
-          publishing_status = 'SCHEDULED',
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(contentId);
+      content.workflow_stage = 'APPROVED';
+      content.review_status = 'APPROVED_BY_CLIENT';
+      content.client_feedback = 'Approved by client: Ready for social media publishing';
+      await content.save();
 
-      recordWorkflowHistory({
+      await recordWorkflowHistory({
         entityType: 'content',
-        entityId: contentId,
-        previousStage: 'CLIENT_REVIEW',
+        entityId: content._id,
+        previousStage: prevStage,
         newStage: 'APPROVED',
         changedBy: req.user.id,
-        remarks: 'Approved by client'
+        remarks: 'Approved by client: Ready for social media publishing'
       });
 
-      // Notify marketing manager & editor
-      if (content.assigned_marketing_manager_id) {
-        const mm = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(content.assigned_marketing_manager_id);
-        if (mm) {
-          createNotification({
-            userId: mm.user_id,
+      if (content.assigned_creator_id) {
+        const creator = await Employee.findById(content.assigned_creator_id);
+        if (creator && creator.user_id) {
+          await createNotification({
+            userId: creator.user_id,
             type: 'CLIENT_APPROVED',
             title: 'Creative Approved by Client! 🎉',
-            message: `Client approved "${content.topic}". It is now ready to schedule.`,
+            message: `Client approved "${content.title}". It is now ready for publishing.`,
             relatedEntity: 'content_items',
-            relatedEntityId: contentId
+            relatedEntityId: content._id
           });
         }
       }
     } else {
-      // 3. Client Requested Changes -> advance to REVISION
-      db.prepare(`
-        UPDATE content_items SET
-          client_approval_status = 'REVISION_REQUESTED',
-          workflow_stage = 'REVISION',
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(contentId);
+      const feedbackNote = specific_change || comment || reason || 'Client requested revisions';
+      content.workflow_stage = 'REVISION';
+      content.review_status = 'REVISION_REQUESTED';
+      content.client_feedback = feedbackNote;
+      await content.save();
 
-      recordWorkflowHistory({
+      await recordWorkflowHistory({
         entityType: 'content',
-        entityId: contentId,
-        previousStage: 'CLIENT_REVIEW',
+        entityId: content._id,
+        previousStage: prevStage,
         newStage: 'REVISION',
         changedBy: req.user.id,
-        remarks: `Client requested changes: ${reason || ''} - ${specific_change || comment}`
+        remarks: `Client revision note: ${feedbackNote}`
       });
 
-      // Notify Editor & Marketing Manager
-      if (content.assigned_editor_id) {
-        const editor = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(content.assigned_editor_id);
-        if (editor) {
-          createNotification({
-            userId: editor.user_id,
+      if (content.assigned_creator_id) {
+        const creator = await Employee.findById(content.assigned_creator_id);
+        if (creator && creator.user_id) {
+          await createNotification({
+            userId: creator.user_id,
             type: 'REVISION_REQUESTED',
-            title: 'Client Revision Requested ✏️',
-            message: `Client requested change on "${content.topic}": ${specific_change || comment}`,
+            title: `Client Revision Note on "${content.title}" ⚠️`,
+            message: `Client requested revisions: "${feedbackNote}"`,
             relatedEntity: 'content_items',
-            relatedEntityId: contentId
+            relatedEntityId: content._id
           });
         }
       }
     }
-  });
 
-  reviewTransaction();
+    await logAudit({
+      userId: req.user.id,
+      action: action === 'APPROVE' ? 'APPROVED' : 'REVISION_REQUESTED',
+      entity: 'content_items',
+      entityId: content._id,
+      newValue: { reviewer: 'CLIENT', action, specific_change },
+      ip: req.ip
+    });
 
-  logAudit({
-    userId: req.user.id,
-    action: action === 'APPROVE' ? 'APPROVED' : 'REVISION_REQUESTED',
-    entity: 'content_items',
-    entityId: contentId,
-    newValue: { reviewer: 'CLIENT', action, specific_change },
-    ip: req.ip
-  });
-
-  const updated = db.prepare('SELECT * FROM content_items WHERE id = ?').get(contentId);
-  res.json({ message: `Client review recorded: ${action}`, content: updated });
+    res.json({ message: `Client review recorded: ${action}`, content: content.toJSON() });
+  } catch (err) {
+    console.error('Error in client review:', err);
+    res.status(500).json({ error: 'Failed to record client review.' });
+  }
 });
 
 export default router;

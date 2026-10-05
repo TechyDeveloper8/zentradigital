@@ -15,6 +15,12 @@ export function getDashboardPath(user) {
   if (user.role_name === 'sales') {
     return '/sales';
   }
+  if (user.role_name === 'editor') {
+    return '/employee?tab=tasks_raw';
+  }
+  if (user.role_name === 'marketing_manager') {
+    return '/employee?tab=content_tasks';
+  }
   return '/employee';
 }
 
@@ -90,10 +96,48 @@ export function AuthProvider({ children }) {
     setAttendance(null);
   };
 
+  // Interactive Role Switcher based on real active database accounts
+  const switchRole = async (targetRole) => {
+    if (targetRole === 'admin') {
+      try {
+        const data = await login('admin', 'Admin@123');
+        const targetPath = getDashboardPath(data.user);
+        return { success: true, targetPath, user: data.user };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+
+    try {
+      const activeUsers = await api.get('/auth/quick-users');
+      const match = (activeUsers || []).find(u =>
+        u.role_name === targetRole ||
+        u.user_type === targetRole ||
+        (targetRole === 'smm' && u.role_name === 'marketing_manager')
+      );
+      if (match) {
+        const data = await login(match.username, 'Admin@123');
+        const targetPath = getDashboardPath(data.user);
+        return { success: true, targetPath, user: data.user };
+      }
+      return {
+        success: false,
+        error: `No account for "${targetRole}" exists yet. As Administrator, you can add new employees and clients anytime.`
+      };
+    } catch (err) {
+      console.error('Role switch failed:', err);
+      return { success: false, error: err.message };
+    }
+  };
+
   const refreshAttendance = async () => {
     if (employee) {
-      const att = await api.get('/attendance/my-today');
-      setAttendance(att.record);
+      try {
+        const att = await api.get('/attendance/my-today');
+        setAttendance(att.record);
+      } catch (e) {
+        console.error('Failed to refresh attendance:', e);
+      }
     }
   };
 
@@ -107,12 +151,15 @@ export function AuthProvider({ children }) {
       loading,
       login,
       logout,
+      switchRole,
       refreshAttendance,
       loadProfile,
       getDashboardPath,
       isAuthenticated: !!(token && user),
       isAdmin: user?.role_name === 'admin',
       isSales: user?.role_name === 'sales',
+      isEditor: user?.role_name === 'editor',
+      isSMM: user?.role_name === 'marketing_manager',
       isEmployee: user?.user_type === 'employee' || user?.role_name === 'admin',
       isClient: user?.user_type === 'client'
     }}>

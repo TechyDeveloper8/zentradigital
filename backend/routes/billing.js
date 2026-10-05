@@ -1,251 +1,293 @@
 import express from 'express';
-import db, { logAudit } from '../db/database.js';
+import mongoose from 'mongoose';
+import { Invoice, Payment, Contract, Client } from '../models/index.js';
+import { logAudit } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // List Invoices
-router.get('/invoices', authenticate, (req, res) => {
-  const { client_id, payment_status, search } = req.query;
+router.get('/invoices', authenticate, async (req, res) => {
+  try {
+    const { client_id, payment_status, search } = req.query;
 
-  let sql = `
-    SELECT inv.*, c.company_name, c.client_code, c.primary_contact_email
-    FROM invoices inv
-    JOIN clients c ON inv.client_id = c.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const query = {};
 
-  if (req.user.user_type === 'client') {
-    sql += ` AND c.user_id = ?`;
-    params.push(req.user.id);
-  } else if (client_id) {
-    sql += ` AND inv.client_id = ?`;
-    params.push(client_id);
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) return res.json([]);
+      query.client_id = client._id;
+    } else if (client_id && mongoose.Types.ObjectId.isValid(client_id)) {
+      query.client_id = client_id;
+    }
+
+    if (payment_status) {
+      query.payment_status = payment_status;
+    }
+
+    let invoices = await Invoice.find(query)
+      .populate('client_id')
+      .sort({ due_date: -1, created_at: -1 });
+
+    if (search && search.trim()) {
+      const s = search.trim().toLowerCase();
+      invoices = invoices.filter(inv =>
+        (inv.invoice_number && inv.invoice_number.toLowerCase().includes(s)) ||
+        (inv.client_id?.company_name && inv.client_id.company_name.toLowerCase().includes(s))
+      );
+    }
+
+    const formatted = invoices.map(inv => {
+      const c = inv.client_id;
+      return {
+        ...inv.toJSON(),
+        company_name: c?.company_name || '',
+        client_code: c?.client_code || '',
+        primary_contact_email: c?.primary_contact_email || '',
+        items: inv.items || []
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error listing invoices:', err);
+    res.status(500).json({ error: 'Failed to retrieve invoices.' });
   }
-
-  if (payment_status) {
-    sql += ` AND inv.payment_status = ?`;
-    params.push(payment_status);
-  }
-  if (search) {
-    sql += ` AND (inv.invoice_number LIKE ? OR c.company_name LIKE ?)`;
-    const s = `%${search}%`;
-    params.push(s, s);
-  }
-
-  sql += ` ORDER BY inv.due_date DESC, inv.id DESC`;
-  const invoices = db.prepare(sql).all(...params);
-
-  // Attach line items
-  const stmtItems = db.prepare('SELECT * FROM invoice_items WHERE invoice_id = ?');
-  const populated = invoices.map(inv => ({
-    ...inv,
-    items: stmtItems.all(inv.id)
-  }));
-
-  res.json(populated);
 });
 
 // Single Invoice Detail
-router.get('/invoices/:id', authenticate, (req, res) => {
-  const invoice = db.prepare(`
-    SELECT inv.*, c.company_name, c.client_code, c.address, c.city, c.state,
-           c.gst_number, c.pan, c.primary_contact_name, c.primary_contact_phone, c.primary_contact_email
-    FROM invoices inv
-    JOIN clients c ON inv.client_id = c.id
-    WHERE inv.id = ?
-  `).get(req.params.id);
-
-  if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found' });
-  }
-
-  const items = db.prepare('SELECT * FROM invoice_items WHERE invoice_id = ?').all(invoice.id);
-  const payments = db.prepare('SELECT * FROM payments WHERE invoice_id = ? ORDER BY payment_date DESC').all(invoice.id);
-
-  res.json({ invoice, items, payments });
-});
-
-// Create Invoice (Section 37)
-router.post('/invoices', authenticate, requireRole(['admin']), (req, res) => {
-  const {
-    client_id, contract_id, billing_period_start, billing_period_end,
-    due_date, discount, tax, notes, items
-  } = req.body;
-
-  if (!client_id || !due_date || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'Client, due date, and at least one item are required.' });
-  }
-
-  const count = db.prepare('SELECT COUNT(*) as count FROM invoices').get().count + 1;
-  const invoice_number = `INV-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
-
-  const subtotal = items.reduce((sum, it) => sum + (Number(it.rate) * (Number(it.quantity) || 1)), 0);
-  const numDiscount = Number(discount) || 0;
-  const numTax = Number(tax) || 0;
-  const total = (subtotal - numDiscount) + numTax;
-
-  const insertTransaction = db.transaction(() => {
-    const invRes = db.prepare(`
-      INSERT INTO invoices (
-        invoice_number, client_id, contract_id, billing_period_start,
-        billing_period_end, subtotal, discount, tax, total, due_date,
-        payment_status, paid_amount, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNPAID', 0, ?)
-    `).run(
-      invoice_number, client_id, contract_id || null, billing_period_start || null,
-      billing_period_end || null, subtotal, numDiscount, numTax, total, due_date, notes || ''
-    );
-
-    const invoiceId = invRes.lastInsertRowid;
-
-    const insertItem = db.prepare(`
-      INSERT INTO invoice_items (invoice_id, description, quantity, rate, amount)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-
-    for (const it of items) {
-      const lineTotal = Number(it.rate) * (Number(it.quantity) || 1);
-      insertItem.run(invoiceId, it.description, Number(it.quantity) || 1, Number(it.rate), lineTotal);
+router.get('/invoices/:id', authenticate, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Invoice not found' });
     }
 
-    return invoiceId;
-  });
+    const invoice = await Invoice.findById(req.params.id).populate('client_id');
+    if (!invoice) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
 
-  const invoiceId = insertTransaction();
+    const payments = await Payment.find({ invoice_id: invoice._id }).sort({ payment_date: -1 });
 
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'invoices',
-    entityId: invoiceId,
-    newValue: { invoice_number, total, client_id },
-    ip: req.ip
-  });
+    const c = invoice.client_id;
+    const formattedInvoice = {
+      ...invoice.toJSON(),
+      company_name: c?.company_name || '',
+      client_code: c?.client_code || '',
+      address: c?.address || '',
+      city: c?.city || '',
+      state: c?.state || '',
+      gst_number: c?.gst_number || '',
+      pan: c?.pan || '',
+      primary_contact_name: c?.primary_contact_name || '',
+      primary_contact_phone: c?.primary_contact_phone || '',
+      primary_contact_email: c?.primary_contact_email || ''
+    };
 
-  const created = db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoiceId);
-  res.status(201).json({ message: 'Invoice created successfully', invoice: created });
+    res.json({
+      invoice: formattedInvoice,
+      items: invoice.items || [],
+      payments: payments.map(p => p.toJSON())
+    });
+  } catch (err) {
+    console.error('Error fetching invoice detail:', err);
+    res.status(500).json({ error: 'Failed to retrieve invoice.' });
+  }
+});
+
+// Create Invoice
+router.post('/invoices', authenticate, requireRole(['admin']), async (req, res) => {
+  try {
+    const {
+      client_id, contract_id, billing_period_start, billing_period_end,
+      due_date, discount, tax, notes, items
+    } = req.body;
+
+    if (!client_id || !due_date || !items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Client, due date, and at least one item are required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(client_id)) {
+      return res.status(400).json({ error: 'Invalid client ID.' });
+    }
+
+    const count = await Invoice.countDocuments() + 1;
+    const invoice_number = `INV-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
+
+    const subtotal = items.reduce((sum, it) => sum + (Number(it.rate || it.unit_price) * (Number(it.quantity) || 1)), 0);
+    const numDiscount = Number(discount) || 0;
+    const numTax = Number(tax) || 0;
+    const total = (subtotal - numDiscount) + numTax;
+
+    const lineItems = items.map(it => ({
+      description: it.description || '',
+      quantity: Number(it.quantity) || 1,
+      unit_price: Number(it.rate || it.unit_price) || 0,
+      total_amount: Number(it.rate || it.unit_price) * (Number(it.quantity) || 1)
+    }));
+
+    const newInvoice = await Invoice.create({
+      invoice_number,
+      client_id,
+      subtotal,
+      discount_amount: numDiscount,
+      tax_amount: numTax,
+      total_amount: total,
+      due_date: new Date(due_date),
+      payment_status: 'SENT',
+      paid_amount: 0,
+      balance_due: total,
+      notes: notes || '',
+      items: lineItems
+    });
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'CREATED',
+      entity: 'invoices',
+      entityId: newInvoice._id,
+      newValue: { invoice_number, total, client_id },
+      ip: req.ip
+    });
+
+    res.status(201).json({ message: 'Invoice created successfully', invoice: newInvoice.toJSON() });
+  } catch (err) {
+    console.error('Error creating invoice:', err);
+    res.status(500).json({ error: 'Failed to create invoice.' });
+  }
 });
 
 // Record Payment
-router.post('/payments', authenticate, requireRole(['admin']), (req, res) => {
-  const { invoice_id, amount, payment_date, payment_method, reference_number, notes } = req.body;
+router.post('/payments', authenticate, requireRole(['admin']), async (req, res) => {
+  try {
+    const { invoice_id, amount, payment_date, payment_method, reference_number, notes } = req.body;
 
-  if (!invoice_id || !amount || !payment_method) {
-    return res.status(400).json({ error: 'Invoice ID, amount, and payment method are required.' });
+    if (!invoice_id || !amount || !payment_method) {
+      return res.status(400).json({ error: 'Invoice ID, amount, and payment method are required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(invoice_id)) {
+      return res.status(404).json({ error: 'Invalid invoice ID.' });
+    }
+
+    const invoice = await Invoice.findById(invoice_id);
+    if (!invoice) {
+      return res.status(404).json({ error: 'Invoice not found.' });
+    }
+
+    const payAmount = Number(amount);
+    const newPaidTotal = (invoice.paid_amount || 0) + payAmount;
+    let newStatus = 'PARTIALLY_PAID';
+
+    if (newPaidTotal >= invoice.total_amount) {
+      newStatus = 'PAID';
+    }
+
+    await Payment.create({
+      invoice_id: invoice._id,
+      client_id: invoice.client_id,
+      payment_date: payment_date ? new Date(payment_date) : new Date(),
+      amount: payAmount,
+      payment_mode: payment_method,
+      transaction_reference: reference_number || '',
+      notes: notes || ''
+    });
+
+    invoice.paid_amount = newPaidTotal;
+    invoice.balance_due = Math.max(0, invoice.total_amount - newPaidTotal);
+    invoice.payment_status = newStatus;
+    await invoice.save();
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'PAYMENT_RECORDED',
+      entity: 'invoices',
+      entityId: invoice._id,
+      newValue: { amount: payAmount, new_paid_total: newPaidTotal, status: newStatus },
+      ip: req.ip
+    });
+
+    res.status(201).json({ message: 'Payment recorded successfully', payment_status: newStatus });
+  } catch (err) {
+    console.error('Error recording payment:', err);
+    res.status(500).json({ error: 'Failed to record payment.' });
   }
-
-  const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(invoice_id);
-  if (!invoice) {
-    return res.status(404).json({ error: 'Invoice not found.' });
-  }
-
-  const payAmount = Number(amount);
-  const newPaidTotal = (invoice.paid_amount || 0) + payAmount;
-  let newStatus = 'PARTIAL';
-
-  if (newPaidTotal >= invoice.total) {
-    newStatus = 'PAID';
-  }
-
-  const payTransaction = db.transaction(() => {
-    // 1. Insert Payment
-    db.prepare(`
-      INSERT INTO payments (
-        invoice_id, client_id, payment_date, amount, payment_method, reference_number, notes, recorded_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      invoice.id, invoice.client_id, payment_date || new Date().toISOString().split('T')[0],
-      payAmount, payment_method, reference_number || '', notes || '', req.user.id
-    );
-
-    // 2. Update Invoice
-    db.prepare(`
-      UPDATE invoices SET
-        paid_amount = ?,
-        payment_status = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(newPaidTotal, newStatus, invoice.id);
-  });
-
-  payTransaction();
-
-  logAudit({
-    userId: req.user.id,
-    action: 'PAYMENT_RECORDED',
-    entity: 'invoices',
-    entityId: invoice.id,
-    newValue: { amount: payAmount, new_paid_total: newPaidTotal, status: newStatus },
-    ip: req.ip
-  });
-
-  res.status(201).json({ message: 'Payment recorded successfully', payment_status: newStatus });
 });
 
-// List Contracts / Subscriptions (Section 38)
-router.get('/contracts', authenticate, (req, res) => {
-  const { client_id } = req.query;
+// List Contracts
+router.get('/contracts', authenticate, async (req, res) => {
+  try {
+    const { client_id } = req.query;
 
-  let sql = `
-    SELECT con.*, c.company_name, c.client_code
-    FROM contracts con
-    JOIN clients c ON con.client_id = c.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const query = {};
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) return res.json([]);
+      query.client_id = client._id;
+    } else if (client_id && mongoose.Types.ObjectId.isValid(client_id)) {
+      query.client_id = client_id;
+    }
 
-  if (req.user.user_type === 'client') {
-    sql += ` AND c.user_id = ?`;
-    params.push(req.user.id);
-  } else if (client_id) {
-    sql += ` AND con.client_id = ?`;
-    params.push(client_id);
+    const contracts = await Contract.find(query).populate('client_id').sort({ end_date: -1 });
+
+    const formatted = contracts.map(con => ({
+      ...con.toJSON(),
+      company_name: con.client_id?.company_name || '',
+      client_code: con.client_id?.client_code || ''
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error listing contracts:', err);
+    res.status(500).json({ error: 'Failed to retrieve contracts.' });
   }
-
-  sql += ` ORDER BY con.end_date DESC`;
-  const contracts = db.prepare(sql).all(...params);
-  res.json(contracts);
 });
 
 // Create Contract
-router.post('/contracts', authenticate, requireRole(['admin']), (req, res) => {
-  const {
-    client_id, package_name, services_json, start_date, end_date,
-    monthly_amount, billing_cycle, deliverables_summary, renewal_date, status
-  } = req.body;
+router.post('/contracts', authenticate, requireRole(['admin']), async (req, res) => {
+  try {
+    const {
+      client_id, package_name, start_date, end_date, monthly_amount,
+      billing_cycle, deliverables_summary, status
+    } = req.body;
 
-  if (!client_id || !package_name || !start_date || !end_date || !monthly_amount) {
-    return res.status(400).json({ error: 'Client, package name, start/end dates, and monthly amount are required.' });
+    if (!client_id || !package_name || !start_date || !end_date || !monthly_amount) {
+      return res.status(400).json({ error: 'Client, package name, start/end dates, and monthly amount are required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(client_id)) {
+      return res.status(400).json({ error: 'Invalid client ID.' });
+    }
+
+    const count = await Contract.countDocuments() + 1;
+    const contract_number = `CNT-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
+
+    const newContract = await Contract.create({
+      contract_number,
+      client_id,
+      title: package_name,
+      start_date: new Date(start_date),
+      end_date: new Date(end_date),
+      contract_value: Number(monthly_amount) * 12,
+      billing_frequency: billing_cycle || 'MONTHLY',
+      scope_summary: deliverables_summary || '',
+      status: status || 'ACTIVE'
+    });
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'CREATED',
+      entity: 'contracts',
+      entityId: newContract._id,
+      newValue: { contract_number, client_id, monthly_amount },
+      ip: req.ip
+    });
+
+    res.status(201).json({ message: 'Contract created successfully', contract: newContract.toJSON() });
+  } catch (err) {
+    console.error('Error creating contract:', err);
+    res.status(500).json({ error: 'Failed to create contract.' });
   }
-
-  const count = db.prepare('SELECT COUNT(*) as count FROM contracts').get().count + 1;
-  const contract_code = `CNT-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
-
-  const result = db.prepare(`
-    INSERT INTO contracts (
-      contract_code, client_id, package_name, services_json, start_date, end_date,
-      monthly_amount, billing_cycle, deliverables_summary, renewal_date, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    contract_code, client_id, package_name,
-    typeof services_json === 'object' ? JSON.stringify(services_json) : services_json || '',
-    start_date, end_date, Number(monthly_amount), billing_cycle || 'Monthly',
-    deliverables_summary || '', renewal_date || end_date, status || 'ACTIVE'
-  );
-
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'contracts',
-    entityId: result.lastInsertRowid,
-    newValue: { contract_code, client_id, monthly_amount },
-    ip: req.ip
-  });
-
-  const created = db.prepare('SELECT * FROM contracts WHERE id = ?').get(result.lastInsertRowid);
-  res.status(201).json({ message: 'Contract created successfully', contract: created });
 });
 
 export default router;

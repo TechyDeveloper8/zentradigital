@@ -1,21 +1,21 @@
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
 :root {
-  /* Minimal Corporate Palette: White / Black / Deep Red */
-  --bg-white: #FFFFFF;
-  --bg-black: #0A0A0A;
-  --bg-subtle: #F8F8F8;
+  /* High-Contrast Black and Red Dark Palette */
+  --bg-white: #1A1A1A;
+  --bg-black: #0D0D0D;
+  --bg-subtle: #141414;
   
-  --accent-red: #E00000;
-  --accent-red-hover: #B80000;
+  --accent-red: #E50914;
+  --accent-red-hover: #C10712;
   
-  --text-black: #0A0A0A;
+  --text-black: #FFFFFF;
   --text-white: #FFFFFF;
-  --text-muted: #555555;
-  --text-dim: #888888;
+  --text-muted: #A1A1AA;
+  --text-dim: #71717A;
   
-  --border-subtle: #E5E5E5;
-  --border-dark: #0A0A0A;
+  --border-subtle: #2D2D2D;
+  --border-dark: #3D3D3D;
   
   /* Corporate High-End Typography (Apple / Stripe / McKinsey Style) */
   --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -30,8 +30,8 @@
 }
 
 html, body {
-  background-color: var(--bg-white);
-  color: var(--text-black);
+  background-color: #0D0D0D;
+  color: #FFFFFF;
   font-family: var(--font-body);
   overflow-x: hidden;
   scroll-behavior: smooth;
@@ -97,9 +97,9 @@ h1, h2, h3, h4, h5, h6 {
   justify-content: center;
   gap: 0.6rem;
   padding: 0.9rem 2.2rem;
-  background: #FFFFFF;
-  color: var(--text-black);
-  border: 1px solid var(--border-dark);
+  background: #141414;
+  color: #FFFFFF;
+  border: 1px solid var(--border-subtle);
   border-radius: 9999px;
   font-family: var(--font-body);
   font-weight: 600;
@@ -112,9 +112,11 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .btn-secondary:hover {
-  background: var(--bg-black);
+  background: #1A1A1A;
+  border-color: var(--accent-red);
   color: #FFFFFF;
   transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(229, 9, 20, 0.2);
 }
 
 /* Red Highlight Text */

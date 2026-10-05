@@ -85,9 +85,9 @@ export default function Tasks() {
   const statusOptions = ['TODO', 'IN PROGRESS', 'WAITING', 'INTERNAL REVIEW', 'CLIENT REVIEW', 'REVISION', 'COMPLETED'];
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div className="portal-page-header">
         <div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 4px' }}>
             Tasks Management Board
@@ -97,30 +97,22 @@ export default function Tasks() {
           </p>
         </div>
 
-        <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
-          <Plus size={16} /> Create Task
-        </button>
+        <div className="portal-header-actions">
+          <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
+            <Plus size={16} /> Create Task
+          </button>
+        </div>
       </div>
 
       {/* Filter Bar */}
-      <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        gap: '12px',
-        backgroundColor: 'var(--bg-card)',
-        padding: '12px 18px',
-        borderRadius: '12px',
-        border: '1px solid var(--border-color)',
-        marginBottom: '20px'
-      }}>
+      <div className="portal-filter-bar">
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#9CA3AF' }}>
           <Filter size={15} /> Filters:
         </div>
 
         <select
           className="form-control"
-          style={{ width: 'auto', padding: '6px 10px', fontSize: '12.5px' }}
+          style={{ width: 'auto', minWidth: '130px', padding: '6px 10px', fontSize: '12.5px' }}
           value={filterStatus}
           onChange={e => setFilterStatus(e.target.value)}
         >
@@ -132,7 +124,7 @@ export default function Tasks() {
 
         <select
           className="form-control"
-          style={{ width: 'auto', padding: '6px 10px', fontSize: '12.5px' }}
+          style={{ width: 'auto', minWidth: '130px', padding: '6px 10px', fontSize: '12.5px' }}
           value={filterPriority}
           onChange={e => setFilterPriority(e.target.value)}
         >
@@ -258,7 +250,7 @@ export default function Tasks() {
                   />
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-2">
                   <div className="form-group">
                     <label className="form-label">Client *</label>
                     <select
@@ -288,7 +280,7 @@ export default function Tasks() {
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-2">
                   <div className="form-group">
                     <label className="form-label">Assign Employee</label>
                     <select
@@ -317,7 +309,7 @@ export default function Tasks() {
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-3">
                   <div className="form-group">
                     <label className="form-label">Priority</label>
                     <select

@@ -112,9 +112,9 @@ export default function Leads() {
   const stages = ['ALL', 'NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST'];
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div className="portal-page-header">
         <div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 4px' }}>
             Leads & Sales Pipeline
@@ -124,9 +124,11 @@ export default function Leads() {
           </p>
         </div>
 
-        <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
-          <Plus size={16} /> Add New Lead
-        </button>
+        <div className="portal-header-actions">
+          <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
+            <Plus size={16} /> Add New Lead
+          </button>
+        </div>
       </div>
 
       {/* Stage Tabs */}

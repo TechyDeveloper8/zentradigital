@@ -1,269 +1,440 @@
 import express from 'express';
-import db, { logAudit, createNotification, recordWorkflowHistory } from '../db/database.js';
+import mongoose from 'mongoose';
+import { Task, Client, Project, Employee, User, Role } from '../models/index.js';
+import { logAudit, createNotification, recordWorkflowHistory } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // List Tasks with Filters
-router.get('/', authenticate, (req, res) => {
-  const { client_id, project_id, assigned_to, status, priority, overdue, search } = req.query;
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const { client_id, project_id, assigned_to, status, priority, overdue, search } = req.query;
 
-  let sql = `
-    SELECT t.*, c.company_name, c.client_code,
-           p.project_name,
-           e.first_name || ' ' || e.last_name as assigned_employee_name,
-           rev.first_name || ' ' || rev.last_name as reviewer_name,
-           creator.username as created_by_username
-    FROM tasks t
-    JOIN clients c ON t.client_id = c.id
-    LEFT JOIN projects p ON t.project_id = p.id
-    LEFT JOIN employees e ON t.assigned_employee_id = e.id
-    LEFT JOIN employees rev ON t.reviewer_id = rev.id
-    LEFT JOIN users creator ON t.created_by = creator.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const query = {};
 
-  // Client visibility: client only sees tasks with client_visible = 1 for their company
-  if (req.user.user_type === 'client') {
-    sql += ` AND c.user_id = ? AND t.client_visible = 1`;
-    params.push(req.user.id);
-  } else if (req.user.role_name === 'editor' && req.employee) {
-    // Editor sees tasks assigned to them or unassigned
-    sql += ` AND (t.assigned_employee_id = ? OR t.assigned_employee_id IS NULL)`;
-    params.push(req.employee.id);
-  }
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) return res.json([]);
+      query.client_id = client._id;
+    } else if (req.user.role_name === 'editor' && req.employee) {
+      query.$or = [
+        { assigned_to: req.employee._id },
+        { assigned_to: null }
+      ];
+    }
 
-  if (client_id) {
-    sql += ` AND t.client_id = ?`;
-    params.push(client_id);
-  }
-  if (project_id) {
-    sql += ` AND t.project_id = ?`;
-    params.push(project_id);
-  }
-  if (assigned_to) {
-    sql += ` AND t.assigned_employee_id = ?`;
-    params.push(assigned_to);
-  }
-  if (status) {
-    sql += ` AND t.status = ?`;
-    params.push(status);
-  }
-  if (priority) {
-    sql += ` AND t.priority = ?`;
-    params.push(priority);
-  }
-  if (overdue === 'true') {
-    sql += ` AND t.due_date < DATE('now') AND t.status != 'COMPLETED'`;
-  }
-  if (search) {
-    sql += ` AND (t.task_title LIKE ? OR t.task_code LIKE ? OR c.company_name LIKE ?)`;
-    const s = `%${search}%`;
-    params.push(s, s, s);
-  }
+    if (client_id && mongoose.Types.ObjectId.isValid(client_id)) query.client_id = client_id;
+    if (project_id && mongoose.Types.ObjectId.isValid(project_id)) query.project_id = project_id;
+    if (assigned_to && mongoose.Types.ObjectId.isValid(assigned_to)) query.assigned_to = assigned_to;
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
 
-  sql += ` ORDER BY CASE WHEN t.priority = 'URGENT' THEN 1 WHEN t.priority = 'HIGH' THEN 2 WHEN t.priority = 'MEDIUM' THEN 3 ELSE 4 END, t.due_date ASC`;
-  const tasks = db.prepare(sql).all(...params);
-  res.json(tasks);
+    if (overdue === 'true') {
+      const today = new Date();
+      query.due_date = { $lt: today };
+      query.status = { $ne: 'COMPLETED' };
+    }
+
+    let tasks = await Task.find(query)
+      .populate('client_id')
+      .populate('project_id')
+      .populate('assigned_to')
+      .sort({ created_at: -1 });
+
+    if (search && search.trim()) {
+      const s = search.trim().toLowerCase();
+      tasks = tasks.filter(t =>
+        (t.title && t.title.toLowerCase().includes(s)) ||
+        (t.task_code && t.task_code.toLowerCase().includes(s)) ||
+        (t.client_id?.company_name && t.client_id.company_name.toLowerCase().includes(s))
+      );
+    }
+
+    const formatted = tasks.map(t => {
+      const c = t.client_id;
+      const p = t.project_id;
+      const e = t.assigned_to;
+
+      return {
+        ...t.toJSON(),
+        task_title: t.title,
+        company_name: c?.company_name || '',
+        client_code: c?.client_code || '',
+        project_name: p?.project_name || '',
+        assigned_employee_name: e ? `${e.first_name} ${e.last_name}` : '',
+        reviewer_name: '',
+        created_by_username: ''
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error listing tasks:', err);
+    res.status(500).json({ error: 'Failed to retrieve tasks.' });
+  }
 });
 
 // Single Task Detail
-router.get('/:id', authenticate, (req, res) => {
-  const task = db.prepare(`
-    SELECT t.*, c.company_name, c.client_code,
-           p.project_name,
-           e.first_name || ' ' || e.last_name as assigned_employee_name,
-           rev.first_name || ' ' || rev.last_name as reviewer_name
-    FROM tasks t
-    JOIN clients c ON t.client_id = c.id
-    LEFT JOIN projects p ON t.project_id = p.id
-    LEFT JOIN employees e ON t.assigned_employee_id = e.id
-    LEFT JOIN employees rev ON t.reviewer_id = rev.id
-    WHERE t.id = ?
-  `).get(req.params.id);
-
-  if (!task) {
-    return res.status(404).json({ error: 'Task not found' });
-  }
-
-  // Comments (respecting internal privacy boundary)
-  let commentsSql = `
-    SELECT tc.*, u.username, u.user_type
-    FROM task_comments tc
-    JOIN users u ON tc.user_id = u.id
-    WHERE tc.task_id = ?
-  `;
-  if (req.user.user_type === 'client') {
-    commentsSql += ` AND tc.is_internal = 0`;
-  }
-  commentsSql += ` ORDER BY tc.created_at ASC`;
-  const comments = db.prepare(commentsSql).all(task.id);
-
-  // Workflow history
-  const history = db.prepare(`
-    SELECT wh.*, u.username as changed_by_user
-    FROM workflow_history wh
-    LEFT JOIN users u ON wh.changed_by = u.id
-    WHERE wh.entity_type = 'task' AND wh.entity_id = ?
-    ORDER BY wh.changed_at DESC
-  `).all(task.id);
-
-  res.json({ task, comments, history });
-});
-
-// Create Task (Section 18)
-router.post('/', authenticate, (req, res) => {
-  const {
-    task_title, client_id, project_id, service_id, task_type, description,
-    assigned_employee_id, reviewer_id, priority, start_date, due_date,
-    estimated_hours, dependencies, client_visible, status
-  } = req.body;
-
-  if (!task_title || !client_id || !due_date) {
-    return res.status(400).json({ error: 'Task title, client, and due date are required.' });
-  }
-
-  const count = db.prepare('SELECT COUNT(*) as count FROM tasks').get().count + 1;
-  const task_code = `TSK-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
-
-  const result = db.prepare(`
-    INSERT INTO tasks (
-      task_code, task_title, client_id, project_id, service_id, task_type,
-      description, assigned_employee_id, created_by, reviewer_id, priority,
-      start_date, due_date, estimated_hours, dependencies, client_visible, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    task_code, task_title, client_id, project_id || null, service_id || null,
-    task_type || 'Creative Production', description || '', assigned_employee_id || null,
-    req.user.id, reviewer_id || null, priority || 'MEDIUM', start_date || new Date().toISOString().split('T')[0],
-    due_date, Number(estimated_hours) || 0, dependencies || '',
-    client_visible !== undefined ? (client_visible ? 1 : 0) : 1, status || 'TODO'
-  );
-
-  const taskId = result.lastInsertRowid;
-
-  // Record initial workflow stage
-  recordWorkflowHistory({
-    entityType: 'task',
-    entityId: taskId,
-    previousStage: null,
-    newStage: status || 'TODO',
-    changedBy: req.user.id,
-    remarks: 'Task created'
-  });
-
-  // Notify assigned employee if specified
-  if (assigned_employee_id) {
-    const emp = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(assigned_employee_id);
-    if (emp) {
-      createNotification({
-        userId: emp.user_id,
-        type: 'TASK_ASSIGNED',
-        title: 'New Task Assigned',
-        message: `You were assigned task ${task_code}: "${task_title}" due on ${due_date}.`,
-        relatedEntity: 'tasks',
-        relatedEntityId: taskId
-      });
+router.get('/:id', authenticate, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Task not found' });
     }
+
+    const task = await Task.findById(req.params.id)
+      .populate('client_id')
+      .populate('project_id')
+      .populate('assigned_to')
+      .populate({
+        path: 'comments.user_id',
+        select: 'username user_type'
+      });
+
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const c = task.client_id;
+    const p = task.project_id;
+    const e = task.assigned_to;
+
+    const formattedTask = {
+      ...task.toJSON(),
+      task_title: task.title,
+      company_name: c?.company_name || '',
+      client_code: c?.client_code || '',
+      project_name: p?.project_name || '',
+      assigned_employee_name: e ? `${e.first_name} ${e.last_name}` : '',
+      reviewer_name: ''
+    };
+
+    const formattedComments = (task.comments || []).map(cm => ({
+      ...cm.toObject ? cm.toObject() : cm,
+      username: cm.user_id?.username || 'User',
+      user_type: cm.user_id?.user_type || 'employee'
+    }));
+
+    res.json({
+      task: formattedTask,
+      comments: formattedComments,
+      history: []
+    });
+  } catch (err) {
+    console.error('Error fetching task detail:', err);
+    res.status(500).json({ error: 'Failed to retrieve task.' });
   }
-
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'tasks',
-    entityId: taskId,
-    newValue: { task_code, task_title, client_id, assigned_employee_id, due_date },
-    ip: req.ip
-  });
-
-  const created = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
-  res.status(201).json({ message: 'Task created successfully', task: created });
 });
 
-// Update Task Status / Details
-router.put('/:id', authenticate, (req, res) => {
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-  if (!task) {
-    return res.status(404).json({ error: 'Task not found' });
-  }
+// Create Task
+router.post('/', authenticate, async (req, res) => {
+  try {
+    const {
+      task_title, title, client_id, project_id, task_type, description,
+      assigned_employee_id, priority, start_date, due_date, estimated_hours, status
+    } = req.body;
 
-  const {
-    task_title, task_type, description, assigned_employee_id, reviewer_id,
-    priority, due_date, actual_hours, status, client_visible
-  } = req.body;
+    const finalTitle = task_title || title;
+    if (!finalTitle || !client_id || !due_date) {
+      return res.status(400).json({ error: 'Task title, client, and due date are required.' });
+    }
 
-  const previousStatus = task.status;
-  const newStatus = status || task.status;
+    if (!mongoose.Types.ObjectId.isValid(client_id)) {
+      return res.status(400).json({ error: 'Invalid client ID.' });
+    }
 
-  db.prepare(`
-    UPDATE tasks SET
-      task_title = coalesce(?, task_title),
-      task_type = coalesce(?, task_type),
-      description = coalesce(?, description),
-      assigned_employee_id = coalesce(?, assigned_employee_id),
-      reviewer_id = coalesce(?, reviewer_id),
-      priority = coalesce(?, priority),
-      due_date = coalesce(?, due_date),
-      actual_hours = coalesce(?, actual_hours),
-      status = ?,
-      client_visible = coalesce(?, client_visible),
-      completed_at = CASE WHEN ? = 'COMPLETED' THEN CURRENT_TIMESTAMP ELSE completed_at END,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    task_title, task_type, description, assigned_employee_id, reviewer_id,
-    priority, due_date, actual_hours, newStatus,
-    client_visible !== undefined ? (client_visible ? 1 : 0) : null,
-    newStatus, task.id
-  );
+    const count = await Task.countDocuments() + 1;
+    const task_code = `TSK-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
 
-  // If status changed, record workflow history & notification
-  if (newStatus !== previousStatus) {
-    recordWorkflowHistory({
-      entityType: 'task',
-      entityId: task.id,
-      previousStage: previousStatus,
-      newStage: newStatus,
-      changedBy: req.user.id,
-      remarks: `Status updated from ${previousStatus} to ${newStatus}`
+    const newTask = await Task.create({
+      task_code,
+      title: finalTitle,
+      client_id,
+      project_id: project_id && mongoose.Types.ObjectId.isValid(project_id) ? project_id : null,
+      assigned_to: assigned_employee_id && mongoose.Types.ObjectId.isValid(assigned_employee_id) ? assigned_employee_id : null,
+      created_by: req.user._id,
+      task_type: task_type || 'Creative Production',
+      description: description || '',
+      priority: priority || 'MEDIUM',
+      status: status || 'TODO',
+      workflow_stage: 'INBOX',
+      start_date: start_date ? new Date(start_date) : new Date(),
+      due_date: new Date(due_date),
+      estimated_hours: Number(estimated_hours) || 0
     });
 
-    logAudit({
+    if (assigned_employee_id && mongoose.Types.ObjectId.isValid(assigned_employee_id)) {
+      const emp = await Employee.findById(assigned_employee_id);
+      if (emp?.user_id) {
+        await createNotification({
+          userId: emp.user_id,
+          type: 'TASK_ASSIGNED',
+          title: 'New Task Assigned',
+          message: `You were assigned task ${task_code}: "${finalTitle}" due on ${due_date}.`,
+          relatedEntity: 'tasks',
+          relatedEntityId: newTask._id
+        });
+      }
+    }
+
+    await recordWorkflowHistory({
+      entityType: 'task',
+      entityId: newTask._id,
+      previousStage: null,
+      newStage: status || 'TODO',
+      changedBy: req.user.id,
+      remarks: 'Task created'
+    });
+
+    await logAudit({
       userId: req.user.id,
-      action: 'STATUS_CHANGED',
+      action: 'CREATED',
       entity: 'tasks',
-      entityId: task.id,
-      oldValue: { status: previousStatus },
-      newValue: { status: newStatus },
+      entityId: newTask._id,
+      newValue: { task_code, title: finalTitle, client_id },
       ip: req.ip
     });
-  }
 
-  const updated = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
-  res.json({ message: 'Task updated successfully', task: updated });
+    res.status(201).json({
+      message: 'Task created successfully',
+      task: { ...newTask.toJSON(), task_title: newTask.title }
+    });
+  } catch (err) {
+    console.error('Error creating task:', err);
+    res.status(500).json({ error: 'Failed to create task.' });
+  }
+});
+
+// Update Task
+router.put('/:id', authenticate, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const task = await Task.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const {
+      task_title, title, task_type, description, assigned_employee_id,
+      priority, due_date, actual_hours, status
+    } = req.body;
+
+    const prevStatus = task.status;
+    const newStatus = status || task.status;
+
+    if (task_title || title) task.title = task_title || title;
+    if (task_type !== undefined) task.task_type = task_type;
+    if (description !== undefined) task.description = description;
+    if (assigned_employee_id !== undefined) task.assigned_to = mongoose.Types.ObjectId.isValid(assigned_employee_id) ? assigned_employee_id : null;
+    if (priority !== undefined) task.priority = priority;
+    if (due_date !== undefined) task.due_date = new Date(due_date);
+    if (actual_hours !== undefined) task.actual_hours = Number(actual_hours);
+    if (status !== undefined) {
+      task.status = newStatus;
+      task.workflow_stage = newStatus;
+    }
+
+    await task.save();
+
+    if (newStatus !== prevStatus) {
+      await recordWorkflowHistory({
+        entityType: 'task',
+        entityId: task._id,
+        previousStage: prevStatus,
+        newStage: newStatus,
+        changedBy: req.user.id,
+        remarks: `Status updated from ${prevStatus} to ${newStatus}`
+      });
+
+      await logAudit({
+        userId: req.user.id,
+        action: 'STATUS_CHANGED',
+        entity: 'tasks',
+        entityId: task._id,
+        oldValue: { status: prevStatus },
+        newValue: { status: newStatus },
+        ip: req.ip
+      });
+    }
+
+    res.json({ message: 'Task updated successfully', task: { ...task.toJSON(), task_title: task.title } });
+  } catch (err) {
+    console.error('Error updating task:', err);
+    res.status(500).json({ error: 'Failed to update task.' });
+  }
+});
+
+// Upload Video for Review
+router.post('/:id/upload-video', authenticate, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const task = await Task.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const { edited_video_url, edited_video_name, video_duration, notes } = req.body;
+    const newVersionCount = (Number(task.version_count) || 0) + 1;
+
+    task.edited_video_url = edited_video_url || 'https://assets.mixkit.co/videos/preview/mixkit-luxury-fashion-model-in-studio-41154-large.mp4';
+    task.edited_video_name = edited_video_name || `Video_Edit_v${newVersionCount}.mp4`;
+    task.video_duration = video_duration || '00:45';
+    task.version_count = newVersionCount;
+    task.review_status = 'Pending Approval';
+    task.status = 'INTERNAL_REVIEW';
+    task.workflow_stage = 'INTERNAL_REVIEW';
+
+    const submissionEntry = {
+      reviewer: req.user.username,
+      role: req.user.role_name,
+      decision: 'SUBMISSION',
+      comment: notes || `Cut v${newVersionCount} ready for review`,
+      date: new Date()
+    };
+
+    task.feedback_history.push(submissionEntry);
+    await task.save();
+
+    // Notify Admin
+    const adminRole = await Role.findOne({ name: 'admin' });
+    if (adminRole) {
+      const adminUsers = await User.find({ role_id: adminRole._id });
+      for (const admin of adminUsers) {
+        await createNotification({
+          userId: admin._id,
+          type: 'VIDEO_SUBMITTED',
+          title: `Video Edit Submitted (v${newVersionCount}) 🎬`,
+          message: `${req.user.username} submitted video edit for "${task.title}". Ready for review.`,
+          relatedEntity: 'tasks',
+          relatedEntityId: task._id
+        });
+      }
+    }
+
+    await recordWorkflowHistory({
+      entityType: 'task',
+      entityId: task._id,
+      previousStage: task.status,
+      newStage: 'INTERNAL_REVIEW',
+      changedBy: req.user.id,
+      remarks: `Uploaded video cut v${newVersionCount}: ${notes || 'Ready for review'}`
+    });
+
+    res.json({
+      message: `Video edit version ${newVersionCount} submitted and routed to Admin view for approval`,
+      task: { ...task.toJSON(), task_title: task.title }
+    });
+  } catch (err) {
+    console.error('Error uploading video:', err);
+    res.status(500).json({ error: 'Failed to upload video edit.' });
+  }
+});
+
+// Admin Review Feedback & Approval Loop
+router.post('/:id/review', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const task = await Task.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const { action, comments, reason } = req.body;
+    if (action !== 'APPROVE' && action !== 'REQUEST_CHANGES') {
+      return res.status(400).json({ error: 'Action must be APPROVE or REQUEST_CHANGES.' });
+    }
+
+    const isApproved = action === 'APPROVE';
+    const feedbackText = comments || reason || (isApproved ? 'Approved by Admin' : 'Changes requested');
+
+    task.review_status = isApproved ? 'Approved' : 'Needs Revision';
+    task.status = isApproved ? 'COMPLETED' : 'REVISION';
+    task.workflow_stage = isApproved ? 'APPROVED' : 'REVISION';
+    task.admin_feedback = feedbackText;
+
+    const reviewEntry = {
+      reviewer: req.user.username,
+      role: req.user.role_name,
+      decision: action,
+      comment: feedbackText,
+      date: new Date()
+    };
+    task.feedback_history.push(reviewEntry);
+    await task.save();
+
+    // Notify Video Editor
+    if (task.assigned_to) {
+      const editor = await Employee.findById(task.assigned_to);
+      if (editor?.user_id) {
+        await createNotification({
+          userId: editor.user_id,
+          type: isApproved ? 'TASK_APPROVED' : 'REVISION_REQUESTED',
+          title: isApproved ? 'Video Task Approved! 🎉' : 'Revisions Requested on Video ⚠️',
+          message: isApproved
+            ? `Admin approved your video edit for "${task.title}".`
+            : `Admin requested revisions on "${task.title}": ${feedbackText}`,
+          relatedEntity: 'tasks',
+          relatedEntityId: task._id
+        });
+      }
+    }
+
+    await recordWorkflowHistory({
+      entityType: 'task',
+      entityId: task._id,
+      previousStage: task.status,
+      newStage: task.status,
+      changedBy: req.user.id,
+      remarks: `Admin review: ${action} - ${feedbackText}`
+    });
+
+    res.json({
+      message: isApproved ? 'Video task explicitly approved! Task completed.' : 'Changes requested. Task remains active for editor re-upload.',
+      task: { ...task.toJSON(), task_title: task.title }
+    });
+  } catch (err) {
+    console.error('Error in task review:', err);
+    res.status(500).json({ error: 'Failed to process task review.' });
+  }
 });
 
 // Add Task Comment
-router.post('/:id/comments', authenticate, (req, res) => {
-  const { comment, is_internal } = req.body;
-  if (!comment) {
-    return res.status(400).json({ error: 'Comment text is required.' });
+router.post('/:id/comments', authenticate, async (req, res) => {
+  try {
+    const { comment } = req.body;
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ error: 'Comment text is required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const task = await Task.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    task.comments.push({
+      user_id: req.user._id,
+      comment: comment.trim()
+    });
+    await task.save();
+
+    res.status(201).json({ message: 'Comment added successfully' });
+  } catch (err) {
+    console.error('Error adding task comment:', err);
+    res.status(500).json({ error: 'Failed to add comment.' });
   }
-
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-  if (!task) {
-    return res.status(404).json({ error: 'Task not found' });
-  }
-
-  const internalFlag = req.user.user_type === 'client' ? 0 : (is_internal !== undefined ? (is_internal ? 1 : 0) : 1);
-
-  const result = db.prepare(`
-    INSERT INTO task_comments (task_id, user_id, comment, is_internal)
-    VALUES (?, ?, ?, ?)
-  `).run(task.id, req.user.id, comment, internalFlag);
-
-  res.status(201).json({ message: 'Comment added', comment_id: result.lastInsertRowid });
 });
 
 export default router;

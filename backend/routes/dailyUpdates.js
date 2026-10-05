@@ -1,87 +1,105 @@
 import express from 'express';
-import db, { logAudit } from '../db/database.js';
+import mongoose from 'mongoose';
+import { DailyClientUpdate, Client } from '../models/index.js';
+import { logAudit } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-function getTodayDate() {
-  return new Date().toISOString().split('T')[0];
-}
-
 // Get Daily Updates for a Client
-router.get('/', authenticate, (req, res) => {
-  const { client_id, date } = req.query;
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const { client_id, date } = req.query;
 
-  let targetClientId = client_id;
-  if (req.user.user_type === 'client') {
-    const client = db.prepare('SELECT id FROM clients WHERE user_id = ?').get(req.user.id);
-    if (!client) {
-      return res.status(400).json({ error: 'Client record not found' });
+    let targetClientId = client_id;
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) return res.status(400).json({ error: 'Client record not found' });
+      targetClientId = client._id;
     }
-    targetClientId = client.id;
-  }
 
-  let sql = `
-    SELECT dcu.*, c.company_name, u.username as approved_by_username
-    FROM daily_client_updates dcu
-    JOIN clients c ON dcu.client_id = c.id
-    LEFT JOIN users u ON dcu.approved_by = u.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const query = {};
+    if (targetClientId && mongoose.Types.ObjectId.isValid(targetClientId)) {
+      query.client_id = targetClientId;
+    }
+    if (date) {
+      const d = new Date(date);
+      const nextD = new Date(date);
+      nextD.setDate(nextD.getDate() + 1);
+      query.update_date = { $gte: d, $lt: nextD };
+    }
 
-  if (targetClientId) {
-    sql += ` AND dcu.client_id = ?`;
-    params.push(targetClientId);
-  }
-  if (date) {
-    sql += ` AND dcu.update_date = ?`;
-    params.push(date);
-  }
+    const updates = await DailyClientUpdate.find(query)
+      .populate('client_id')
+      .populate('sent_by_employee_id')
+      .sort({ update_date: -1 })
+      .limit(30);
 
-  sql += ` ORDER BY dcu.update_date DESC, dcu.id DESC LIMIT 30`;
-  const updates = db.prepare(sql).all(...params);
-  res.json(updates);
+    const formatted = updates.map(u => ({
+      ...u.toJSON(),
+      company_name: u.client_id?.company_name || '',
+      approved_by_username: ''
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error fetching daily client updates:', err);
+    res.status(500).json({ error: 'Failed to retrieve daily updates.' });
+  }
 });
 
-// Post / Update Client Daily Update (Section 24)
-router.post('/', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const { client_id, update_date, completed_text, in_progress_text, pending_client_text } = req.body;
+// Post / Update Client Daily Update
+router.post('/', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    const { client_id, update_date, completed_text, in_progress_text, pending_client_text } = req.body;
 
-  if (!client_id || !completed_text) {
-    return res.status(400).json({ error: 'Client ID and Completed Work text are required.' });
+    if (!client_id || !completed_text) {
+      return res.status(400).json({ error: 'Client ID and Completed Work text are required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(client_id)) {
+      return res.status(400).json({ error: 'Invalid Client ID.' });
+    }
+
+    const targetDate = update_date ? new Date(update_date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+
+    let updateDoc = await DailyClientUpdate.findOne({
+      client_id,
+      update_date: targetDate
+    });
+
+    if (updateDoc) {
+      updateDoc.completed_work_summary = completed_text;
+      updateDoc.plan_for_tomorrow = in_progress_text || '';
+      updateDoc.urgent_approvals_needed = pending_client_text || '';
+      await updateDoc.save();
+    } else {
+      updateDoc = await DailyClientUpdate.create({
+        client_id,
+        update_date: targetDate,
+        completed_work_summary: completed_text,
+        plan_for_tomorrow: in_progress_text || '',
+        urgent_approvals_needed: pending_client_text || '',
+        sent_by_employee_id: req.employee ? req.employee._id : null,
+        status: 'SENT',
+        sent_at: new Date()
+      });
+    }
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'POSTED',
+      entity: 'daily_client_updates',
+      newValue: { client_id, update_date: targetDate },
+      ip: req.ip
+    });
+
+    res.status(201).json({ message: 'Daily client update posted successfully', update: updateDoc.toJSON() });
+  } catch (err) {
+    console.error('Error posting daily client update:', err);
+    res.status(500).json({ error: 'Failed to post daily update.' });
   }
-
-  const date = update_date || getTodayDate();
-
-  const existing = db.prepare('SELECT id FROM daily_client_updates WHERE client_id = ? AND update_date = ?').get(client_id, date);
-
-  if (existing) {
-    db.prepare(`
-      UPDATE daily_client_updates SET
-        completed_text = ?,
-        in_progress_text = ?,
-        pending_client_text = ?,
-        approved_by = ?
-      WHERE id = ?
-    `).run(completed_text, in_progress_text || '', pending_client_text || '', req.user.id, existing.id);
-  } else {
-    db.prepare(`
-      INSERT INTO daily_client_updates (
-        client_id, update_date, completed_text, in_progress_text, pending_client_text, approved_by
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(client_id, date, completed_text, in_progress_text || '', pending_client_text || '', req.user.id);
-  }
-
-  logAudit({
-    userId: req.user.id,
-    action: 'POSTED',
-    entity: 'daily_client_updates',
-    newValue: { client_id, update_date: date },
-    ip: req.ip
-  });
-
-  res.status(201).json({ message: 'Daily client update posted successfully' });
 });
 
 export default router;

@@ -11,10 +11,19 @@ export function initWebSocketServer(server) {
 
   wss.on('connection', (ws, req) => {
     let authenticatedUserId = null;
+    ws.isAlive = true;
+
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
 
     ws.on('message', (message) => {
       try {
         const data = JSON.parse(message);
+        if (data.type === 'PING') {
+          ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
+          return;
+        }
         if (data.type === 'AUTH') {
           try {
             const decoded = jwt.verify(data.token, JWT_SECRET);
@@ -33,6 +42,10 @@ export function initWebSocketServer(server) {
       }
     });
 
+    ws.on('error', (err) => {
+      // Quietly handle connection errors, cleanup takes place in 'close'
+    });
+
     ws.on('close', () => {
       if (authenticatedUserId && userSockets.has(authenticatedUserId)) {
         userSockets.get(authenticatedUserId).delete(ws);
@@ -41,6 +54,26 @@ export function initWebSocketServer(server) {
         }
       }
     });
+  });
+
+  // Heartbeat ping every 25 seconds to keep connection alive through proxies/NAT
+  const heartbeatInterval = setInterval(() => {
+    if (!wss) return;
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) {
+        return ws.terminate();
+      }
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch (err) {
+        // Socket may already be closed/closing
+      }
+    });
+  }, 25000);
+
+  wss.on('close', () => {
+    clearInterval(heartbeatInterval);
   });
 
   return wss;
@@ -66,5 +99,43 @@ export function broadcast(payload) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
+  }
+}
+
+// Real-time helper: Broadcast video workflow lifecycle changes
+export function broadcastWorkflowEvent(payload) {
+  broadcast({
+    type: 'WORKFLOW_EVENT',
+    ...payload,
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Real-time helper: Broadcast employee attendance punch/adjustment events
+export function broadcastAttendanceEvent(payload) {
+  broadcast({
+    type: 'ATTENDANCE_EVENT',
+    ...payload,
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Real-time helper: Broadcast daily work / sales report submission events
+export function broadcastDailyReportEvent(payload) {
+  broadcast({
+    type: 'DAILY_REPORT_EVENT',
+    ...payload,
+    timestamp: new Date().toISOString()
+  });
+}
+
+// Real-time helper: Send instant user notification
+export function broadcastNotification(userId, notification) {
+  if (userId) {
+    sendToUser(userId, {
+      type: 'NOTIFICATION',
+      notification,
+      timestamp: new Date().toISOString()
+    });
   }
 }

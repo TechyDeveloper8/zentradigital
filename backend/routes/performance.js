@@ -1,96 +1,121 @@
 import express from 'express';
-import db, { logAudit } from '../db/database.js';
+import mongoose from 'mongoose';
+import { ContentPerformance, ContentItem } from '../models/index.js';
+import { logAudit } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Record / Update Content Performance (Section 34)
-router.post('/record', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const {
-    content_id, client_id, platform, reach, impressions, likes, comments,
-    shares, saves, views, clicks, leads_count, conversion_count, recorded_date
-  } = req.body;
-
-  if (!content_id || !platform) {
-    return res.status(400).json({ error: 'Content item and platform are required.' });
-  }
-
-  const content = db.prepare('SELECT client_id FROM content_items WHERE id = ?').get(content_id);
-  const targetClientId = client_id || content?.client_id;
-  const date = recorded_date || new Date().toISOString().split('T')[0];
-
-  const numLikes = Number(likes) || 0;
-  const numComments = Number(comments) || 0;
-  const numShares = Number(shares) || 0;
-  const numSaves = Number(saves) || 0;
-  const numReach = Number(reach) || 0;
-  const totalEngagement = numLikes + numComments + numShares + numSaves;
-  const engagementRate = numReach > 0 ? Math.round((totalEngagement / numReach) * 1000) / 10 : 0;
-
-  const result = db.prepare(`
-    INSERT INTO content_performance (
+// Record / Update Content Performance
+router.post('/record', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    const {
       content_id, client_id, platform, reach, impressions, likes, comments,
-      shares, saves, views, engagement_rate, clicks, leads_count, conversion_count, recorded_date
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    content_id, targetClientId, platform, numReach, Number(impressions) || 0,
-    numLikes, numComments, numShares, numSaves, Number(views) || 0,
-    engagementRate, Number(clicks) || 0, Number(leads_count) || 0, Number(conversion_count) || 0, date
-  );
+      shares, saves, views, clicks, leads_count, conversion_count, recorded_date
+    } = req.body;
 
-  // Mark content as PUBLISHED if not already
-  db.prepare(`
-    UPDATE content_items SET
-      workflow_stage = 'PUBLISHED',
-      publishing_status = 'PUBLISHED',
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(content_id);
+    if (!content_id || !platform) {
+      return res.status(400).json({ error: 'Content item and platform are required.' });
+    }
 
-  logAudit({
-    userId: req.user.id,
-    action: 'PERFORMANCE_RECORDED',
-    entity: 'content_performance',
-    entityId: result.lastInsertRowid,
-    newValue: { content_id, reach: numReach, engagement_rate: engagementRate },
-    ip: req.ip
-  });
+    let targetClientId = client_id;
+    if (!targetClientId && mongoose.Types.ObjectId.isValid(content_id)) {
+      const content = await ContentItem.findById(content_id);
+      targetClientId = content?.client_id;
+    }
 
-  res.status(201).json({ message: 'Performance metrics recorded successfully' });
+    const numLikes = Number(likes) || 0;
+    const numComments = Number(comments) || 0;
+    const numShares = Number(shares) || 0;
+    const numSaves = Number(saves) || 0;
+    const numReach = Number(reach) || 0;
+
+    const newPerf = await ContentPerformance.create({
+      content_id: mongoose.Types.ObjectId.isValid(content_id) ? content_id : null,
+      client_id: targetClientId && mongoose.Types.ObjectId.isValid(targetClientId) ? targetClientId : null,
+      record_date: recorded_date ? new Date(recorded_date) : new Date(),
+      reach: numReach,
+      impressions: Number(impressions) || 0,
+      likes: numLikes,
+      comments: numComments,
+      shares: numShares,
+      saves: numSaves,
+      video_views: Number(views) || 0,
+      clicks: Number(clicks) || 0,
+      conversions: Number(conversion_count) || 0,
+      engagement_count: numLikes + numComments + numShares + numSaves
+    });
+
+    if (mongoose.Types.ObjectId.isValid(content_id)) {
+      await ContentItem.findByIdAndUpdate(content_id, {
+        workflow_stage: 'PUBLISHED',
+        is_published: true,
+        published_at: new Date()
+      });
+    }
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'PERFORMANCE_RECORDED',
+      entity: 'content_performance',
+      entityId: newPerf._id,
+      newValue: { content_id, reach: numReach },
+      ip: req.ip
+    });
+
+    res.status(201).json({ message: 'Performance metrics recorded successfully' });
+  } catch (err) {
+    console.error('Error recording performance:', err);
+    res.status(500).json({ error: 'Failed to record performance metrics.' });
+  }
 });
 
 // Get Performance Summary for a Client
-router.get('/client/:clientId', authenticate, (req, res) => {
-  const clientId = req.params.clientId;
+router.get('/client/:clientId', authenticate, async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(clientId)) {
+      return res.json({
+        summary: { total_reach: 0, total_impressions: 0, total_likes: 0, total_comments: 0 },
+        byPlatform: []
+      });
+    }
 
-  const summary = db.prepare(`
-    SELECT
-      COALESCE(SUM(reach), 0) as total_reach,
-      COALESCE(SUM(impressions), 0) as total_impressions,
-      COALESCE(SUM(likes), 0) as total_likes,
-      COALESCE(SUM(comments), 0) as total_comments,
-      COALESCE(SUM(shares), 0) as total_shares,
-      COALESCE(SUM(saves), 0) as total_saves,
-      COALESCE(SUM(views), 0) as total_views,
-      COALESCE(SUM(clicks), 0) as total_clicks,
-      COALESCE(SUM(leads_count), 0) as total_leads,
-      COALESCE(SUM(conversion_count), 0) as total_conversions,
-      COUNT(DISTINCT content_id) as total_content_tracked
-    FROM content_performance
-    WHERE client_id = ?
-  `).get(clientId);
+    const targetId = new mongoose.Types.ObjectId(clientId);
 
-  const byPlatform = db.prepare(`
-    SELECT platform,
-           SUM(reach) as reach,
-           SUM(likes + comments + shares + saves) as engagement,
-           COUNT(*) as posts_count
-    FROM content_performance
-    WHERE client_id = ?
-    GROUP BY platform
-  `).all(clientId);
+    const aggregates = await ContentPerformance.aggregate([
+      { $match: { client_id: targetId } },
+      {
+        $group: {
+          _id: null,
+          total_reach: { $sum: '$reach' },
+          total_impressions: { $sum: '$impressions' },
+          total_likes: { $sum: '$likes' },
+          total_comments: { $sum: '$comments' },
+          total_shares: { $sum: '$shares' },
+          total_saves: { $sum: '$saves' },
+          total_views: { $sum: '$video_views' },
+          total_clicks: { $sum: '$clicks' },
+          total_conversions: { $sum: '$conversions' },
+          content_ids: { $addToSet: '$content_id' }
+        }
+      }
+    ]);
 
-  res.json({ summary, byPlatform });
+    const summary = aggregates.length > 0 ? {
+      ...aggregates[0],
+      total_content_tracked: aggregates[0].content_ids?.length || 0
+    } : {
+      total_reach: 0, total_impressions: 0, total_likes: 0, total_comments: 0,
+      total_shares: 0, total_saves: 0, total_views: 0, total_clicks: 0,
+      total_conversions: 0, total_content_tracked: 0
+    };
+
+    res.json({ summary, byPlatform: [] });
+  } catch (err) {
+    console.error('Error fetching performance summary:', err);
+    res.status(500).json({ error: 'Failed to fetch performance summary.' });
+  }
 });
 
 export default router;

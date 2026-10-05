@@ -51,9 +51,9 @@ export default function ClientRequestCenter() {
   };
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div className="portal-page-header">
         <div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 4px' }}>
             Client Request Center
@@ -63,9 +63,11 @@ export default function ClientRequestCenter() {
           </p>
         </div>
 
-        <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
-          <Plus size={16} /> Create New Request
-        </button>
+        <div className="portal-header-actions">
+          <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
+            <Plus size={16} /> Create New Request
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -165,7 +167,7 @@ export default function ClientRequestCenter() {
                   />
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-2">
                   <div className="form-group">
                     <label className="form-label">Category *</label>
                     <select
@@ -211,7 +213,7 @@ export default function ClientRequestCenter() {
                   />
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-2">
                   <div className="form-group">
                     <label className="form-label">Needed By Date</label>
                     <input

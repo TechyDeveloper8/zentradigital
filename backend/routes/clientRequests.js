@@ -1,291 +1,290 @@
 import express from 'express';
-import db, { logAudit, createNotification, recordWorkflowHistory } from '../db/database.js';
+import mongoose from 'mongoose';
+import { ClientRequest, Client, Employee, User, Project } from '../models/index.js';
+import { logAudit, createNotification, recordWorkflowHistory } from '../db/helpers.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Helper: Auto-suggest employee ID based on category and client assignment (Section 23)
-function suggestAssignee(clientId, category) {
-  const creativeCategories = ['New Creative', 'Design Change', 'Video', 'Reel'];
-  const marketingCategories = ['Social Media', 'Content', 'Advertisement'];
+// Helper: Auto-suggest employee ID based on category and client assignment
+async function suggestAssignee(clientId, category) {
+  try {
+    const client = await Client.findById(clientId).populate('account_manager_id');
+    if (client?.account_manager_id) return client.account_manager_id._id;
 
-  if (creativeCategories.includes(category)) {
-    // Look for assigned Editor
-    const editor = db.prepare(`
-      SELECT employee_id FROM employee_assignments
-      WHERE client_id = ? AND (employee_role LIKE '%Editor%' OR employee_role LIKE '%Creative%') AND is_active = 1
-      LIMIT 1
-    `).get(clientId);
-    if (editor) return editor.employee_id;
+    const anyEmp = await Employee.findOne({ employment_status: 'Active' });
+    return anyEmp ? anyEmp._id : null;
+  } catch {
+    return null;
   }
-
-  // Otherwise check assigned Marketing Manager
-  const client = db.prepare('SELECT assigned_marketing_manager_id, account_manager_id FROM clients WHERE id = ?').get(clientId);
-  if (client?.assigned_marketing_manager_id) return client.assigned_marketing_manager_id;
-  if (client?.account_manager_id) return client.account_manager_id;
-
-  // Fallback to any active employee
-  const anyEmp = db.prepare("SELECT id FROM employees WHERE employment_status = 'Active' LIMIT 1").get();
-  return anyEmp ? anyEmp.id : null;
 }
 
 // List Client Requests
-router.get('/', authenticate, (req, res) => {
-  const { client_id, status, category, priority, assigned_to, search } = req.query;
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const { client_id, status, category, priority, assigned_to, search } = req.query;
 
-  let sql = `
-    SELECT cr.*, c.company_name, c.client_code,
-           p.project_name,
-           e.first_name || ' ' || e.last_name as assigned_employee_name,
-           e.designation as assigned_employee_designation,
-           u.username as created_by_username
-    FROM client_requests cr
-    JOIN clients c ON cr.client_id = c.id
-    LEFT JOIN projects p ON cr.project_id = p.id
-    LEFT JOIN employees e ON cr.assigned_employee_id = e.id
-    LEFT JOIN users u ON cr.created_by = u.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const query = {};
 
-  if (req.user.user_type === 'client') {
-    sql += ` AND c.user_id = ?`;
-    params.push(req.user.id);
-  } else if (req.user.role_name === 'editor' && req.employee) {
-    sql += ` AND cr.assigned_employee_id = ?`;
-    params.push(req.employee.id);
-  }
-
-  if (client_id) {
-    sql += ` AND cr.client_id = ?`;
-    params.push(client_id);
-  }
-  if (status) {
-    sql += ` AND cr.status = ?`;
-    params.push(status);
-  }
-  if (category) {
-    sql += ` AND cr.category = ?`;
-    params.push(category);
-  }
-  if (priority) {
-    sql += ` AND cr.priority = ?`;
-    params.push(priority);
-  }
-  if (assigned_to) {
-    sql += ` AND cr.assigned_employee_id = ?`;
-    params.push(assigned_to);
-  }
-  if (search) {
-    sql += ` AND (cr.request_title LIKE ? OR cr.request_code LIKE ? OR c.company_name LIKE ?)`;
-    const s = `%${search}%`;
-    params.push(s, s, s);
-  }
-
-  sql += ` ORDER BY CASE WHEN cr.priority = 'URGENT' THEN 1 WHEN cr.priority = 'HIGH' THEN 2 WHEN cr.priority = 'MEDIUM' THEN 3 ELSE 4 END, cr.id DESC`;
-  const requests = db.prepare(sql).all(...params);
-  res.json(requests);
-});
-
-// Single Request Detail (with comments & history)
-router.get('/:id', authenticate, (req, res) => {
-  const request = db.prepare(`
-    SELECT cr.*, c.company_name, c.client_code,
-           p.project_name,
-           e.first_name || ' ' || e.last_name as assigned_employee_name,
-           e.designation as assigned_employee_designation,
-           e.phone as assigned_employee_phone,
-           u.username as created_by_username
-    FROM client_requests cr
-    JOIN clients c ON cr.client_id = c.id
-    LEFT JOIN projects p ON cr.project_id = p.id
-    LEFT JOIN employees e ON cr.assigned_employee_id = e.id
-    LEFT JOIN users u ON cr.created_by = u.id
-    WHERE cr.id = ?
-  `).get(req.params.id);
-
-  if (!request) {
-    return res.status(404).json({ error: 'Request not found' });
-  }
-
-  // Comments
-  let commentsSql = `
-    SELECT rc.*, u.username, u.user_type
-    FROM request_comments rc
-    JOIN users u ON rc.user_id = u.id
-    WHERE rc.request_id = ?
-  `;
-  if (req.user.user_type === 'client') {
-    commentsSql += ` AND rc.is_internal = 0`;
-  }
-  commentsSql += ` ORDER BY rc.created_at ASC`;
-  const comments = db.prepare(commentsSql).all(request.id);
-
-  // Workflow history
-  const history = db.prepare(`
-    SELECT wh.*, u.username as changed_by_user
-    FROM workflow_history wh
-    LEFT JOIN users u ON wh.changed_by = u.id
-    WHERE wh.entity_type = 'request' AND wh.entity_id = ?
-    ORDER BY wh.changed_at DESC
-  `).all(request.id);
-
-  res.json({ request, comments, history });
-});
-
-// Create Client Request (Section 22)
-router.post('/', authenticate, (req, res) => {
-  let {
-    client_id, project_id, request_title, category, description,
-    due_date, priority, reference_file_url, preferred_platform, assigned_employee_id
-  } = req.body;
-
-  // If client user, auto-assign client_id
-  if (req.user.user_type === 'client') {
-    const client = db.prepare('SELECT id FROM clients WHERE user_id = ?').get(req.user.id);
-    if (!client) {
-      return res.status(400).json({ error: 'Client record not found for user.' });
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (!client) return res.json([]);
+      query.client_id = client._id;
+    } else if (req.user.role_name === 'editor' && req.employee) {
+      query.assigned_to = req.employee._id;
     }
-    client_id = client.id;
+
+    if (client_id && mongoose.Types.ObjectId.isValid(client_id)) {
+      query.client_id = client_id;
+    }
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (assigned_to && mongoose.Types.ObjectId.isValid(assigned_to)) {
+      query.assigned_to = assigned_to;
+    }
+
+    let requests = await ClientRequest.find(query)
+      .populate('client_id')
+      .populate('project_id')
+      .populate('assigned_to')
+      .sort({ created_at: -1 });
+
+    if (search && search.trim()) {
+      const s = search.trim().toLowerCase();
+      requests = requests.filter(r =>
+        (r.title && r.title.toLowerCase().includes(s)) ||
+        (r.request_code && r.request_code.toLowerCase().includes(s)) ||
+        (r.client_id?.company_name && r.client_id.company_name.toLowerCase().includes(s))
+      );
+    }
+
+    const formatted = requests.map(r => {
+      const c = r.client_id;
+      const p = r.project_id;
+      const e = r.assigned_to;
+
+      return {
+        ...r.toJSON(),
+        request_title: r.title,
+        company_name: c?.company_name || '',
+        client_code: c?.client_code || '',
+        project_name: p?.project_name || '',
+        assigned_employee_name: e ? `${e.first_name} ${e.last_name}` : '',
+        assigned_employee_designation: e?.designation || '',
+        created_by_username: ''
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error listing client requests:', err);
+    res.status(500).json({ error: 'Failed to retrieve client requests.' });
   }
+});
 
-  if (!client_id || !request_title || !category || !description) {
-    return res.status(400).json({ error: 'Client, request title, category, and description are required.' });
-  }
+// Single Request Detail
+router.get('/:id', authenticate, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Client request not found' });
+    }
 
-  const count = db.prepare('SELECT COUNT(*) as count FROM client_requests').get().count + 1;
-  const request_code = `REQ-${new Date().getFullYear()}-${String(count).padStart(5, '0')}`;
-  const requested_date = new Date().toISOString().split('T')[0];
-
-  // Auto-suggest assignee if not provided
-  const targetAssigneeId = assigned_employee_id || suggestAssignee(client_id, category);
-
-  const result = db.prepare(`
-    INSERT INTO client_requests (
-      request_code, client_id, project_id, request_title, category, description,
-      requested_date, due_date, priority, reference_file_url, preferred_platform,
-      assigned_employee_id, status, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', ?)
-  `).run(
-    request_code, client_id, project_id || null, request_title, category, description,
-    requested_date, due_date || null, priority || 'MEDIUM', reference_file_url || null,
-    preferred_platform || null, targetAssigneeId, req.user.id
-  );
-
-  const requestId = result.lastInsertRowid;
-
-  // Create or link Client Chat for this request (Section 31 & 51)
-  const chatName = `${request_code}: ${request_title}`;
-  const chatRes = db.prepare(`
-    INSERT INTO chats (chat_type, name, client_id, project_id, request_id)
-    VALUES ('CLIENT_COMMUNICATION', ?, ?, ?, ?)
-  `).run(chatName, client_id, project_id || null, requestId);
-
-  // Add client user and assigned employee to chat
-  db.prepare('INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES (?, ?)').run(chatRes.lastInsertRowid, req.user.id);
-  if (targetAssigneeId) {
-    const emp = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(targetAssigneeId);
-    if (emp) {
-      db.prepare('INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES (?, ?)').run(chatRes.lastInsertRowid, emp.user_id);
-      createNotification({
-        userId: emp.user_id,
-        type: 'REQUEST_ASSIGNED',
-        title: `New Client Request: ${request_code}`,
-        message: `Assigned: "${request_title}" (${category}).`,
-        relatedEntity: 'client_requests',
-        relatedEntityId: requestId
+    const request = await ClientRequest.findById(req.params.id)
+      .populate('client_id')
+      .populate('project_id')
+      .populate('assigned_to')
+      .populate({
+        path: 'comments.user_id',
+        select: 'username user_type'
       });
+
+    if (!request) {
+      return res.status(404).json({ error: 'Client request not found' });
     }
+
+    const c = request.client_id;
+    const p = request.project_id;
+    const e = request.assigned_to;
+
+    const formattedComments = (request.comments || []).map(cm => ({
+      ...cm.toObject ? cm.toObject() : cm,
+      user_name: cm.user_id?.username || 'User'
+    }));
+
+    const result = {
+      ...request.toJSON(),
+      request_title: request.title,
+      company_name: c?.company_name || '',
+      client_code: c?.client_code || '',
+      project_name: p?.project_name || '',
+      assigned_employee_name: e ? `${e.first_name} ${e.last_name}` : '',
+      assigned_employee_designation: e?.designation || '',
+      assigned_employee_phone: e?.phone || '',
+      comments: formattedComments
+    };
+
+    res.json({ request: result, comments: formattedComments, history: [] });
+  } catch (err) {
+    console.error('Error fetching request detail:', err);
+    res.status(500).json({ error: 'Failed to retrieve client request.' });
   }
+});
 
-  recordWorkflowHistory({
-    entityType: 'request',
-    entityId: requestId,
-    previousStage: null,
-    newStage: 'NEW',
-    changedBy: req.user.id,
-    remarks: 'Request opened by client'
-  });
+// Create Request
+router.post('/', authenticate, async (req, res) => {
+  try {
+    const {
+      client_id, project_id, title, request_title, description, category,
+      priority, target_date, reference_links, files, assigned_employee_id
+    } = req.body;
 
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'client_requests',
-    entityId: requestId,
-    newValue: { request_code, request_title, category, priority },
-    ip: req.ip
-  });
+    const finalTitle = title || request_title;
+    if (!finalTitle) {
+      return res.status(400).json({ error: 'Request title is required.' });
+    }
 
-  const created = db.prepare('SELECT * FROM client_requests WHERE id = ?').get(requestId);
-  res.status(201).json({ message: 'Request created successfully', request: created });
+    let finalClientId = client_id;
+    if (req.user.user_type === 'client') {
+      const client = await Client.findOne({ user_id: req.user._id });
+      if (client) finalClientId = client._id;
+    }
+
+    if (!finalClientId || !mongoose.Types.ObjectId.isValid(finalClientId)) {
+      return res.status(400).json({ error: 'Valid Client is required for creating a request.' });
+    }
+
+    const count = await ClientRequest.countDocuments() + 1;
+    const request_code = `REQ-${new Date().getFullYear()}-${String(count).padStart(4, '0')}`;
+
+    const assignedEmpId = (assigned_employee_id && mongoose.Types.ObjectId.isValid(assigned_employee_id))
+      ? assigned_employee_id
+      : await suggestAssignee(finalClientId, category);
+
+    const newRequest = await ClientRequest.create({
+      client_id: finalClientId,
+      project_id: project_id && mongoose.Types.ObjectId.isValid(project_id) ? project_id : null,
+      request_code,
+      title: finalTitle,
+      description: description || '',
+      request_type: category || 'General',
+      priority: priority || 'MEDIUM',
+      status: 'SUBMITTED',
+      assigned_to: assignedEmpId,
+      due_date: target_date ? new Date(target_date) : null,
+      attachments: Array.isArray(files) ? files : []
+    });
+
+    if (assignedEmpId) {
+      const emp = await Employee.findById(assignedEmpId);
+      if (emp?.user_id) {
+        await createNotification({
+          userId: emp.user_id,
+          type: 'REQUEST_ASSIGNED',
+          title: `New Client Request (${newRequest.request_code})`,
+          message: `You were assigned request "${newRequest.title}".`,
+          relatedEntity: 'client_requests',
+          relatedEntityId: newRequest._id
+        });
+      }
+    }
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'CREATED',
+      entity: 'client_requests',
+      entityId: newRequest._id,
+      newValue: { request_code: newRequest.request_code, title: newRequest.title },
+      ip: req.ip
+    });
+
+    res.status(201).json({
+      message: 'Client request created successfully',
+      request: newRequest.toJSON()
+    });
+  } catch (err) {
+    console.error('Error creating client request:', err);
+    res.status(500).json({ error: 'Failed to create client request.' });
+  }
 });
 
 // Update Request Status
-router.put('/:id', authenticate, (req, res) => {
-  const request = db.prepare('SELECT * FROM client_requests WHERE id = ?').get(req.params.id);
-  if (!request) {
-    return res.status(404).json({ error: 'Request not found' });
-  }
+router.put('/:id/status', authenticate, async (req, res) => {
+  try {
+    const { status, remarks } = req.body;
+    if (!status) {
+      return res.status(400).json({ error: 'Status is required.' });
+    }
 
-  const { status, assigned_employee_id, resolution_notes, priority } = req.body;
-  const previousStatus = request.status;
-  const newStatus = status || request.status;
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
 
-  db.prepare(`
-    UPDATE client_requests SET
-      status = ?,
-      assigned_employee_id = coalesce(?, assigned_employee_id),
-      resolution_notes = coalesce(?, resolution_notes),
-      priority = coalesce(?, priority),
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(newStatus, assigned_employee_id, resolution_notes, priority, request.id);
+    const request = await ClientRequest.findById(req.params.id);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
 
-  if (newStatus !== previousStatus) {
-    recordWorkflowHistory({
+    const prevStatus = request.status;
+    request.status = status;
+    await request.save();
+
+    await recordWorkflowHistory({
       entityType: 'request',
-      entityId: request.id,
-      previousStage: previousStatus,
-      newStage: newStatus,
+      entityId: request._id,
+      previousStage: prevStatus,
+      newStage: status,
       changedBy: req.user.id,
-      remarks: `Status updated from ${previousStatus} to ${newStatus}`
+      remarks: remarks || ''
     });
 
-    logAudit({
+    await logAudit({
       userId: req.user.id,
       action: 'STATUS_CHANGED',
       entity: 'client_requests',
-      entityId: request.id,
-      oldValue: { status: previousStatus },
-      newValue: { status: newStatus },
+      entityId: request._id,
+      oldValue: { status: prevStatus },
+      newValue: { status, remarks },
       ip: req.ip
     });
-  }
 
-  const updated = db.prepare('SELECT * FROM client_requests WHERE id = ?').get(request.id);
-  res.json({ message: 'Request updated successfully', request: updated });
+    res.json({ message: `Request status transitioned to ${status}`, request: request.toJSON() });
+  } catch (err) {
+    console.error('Error updating request status:', err);
+    res.status(500).json({ error: 'Failed to update request status.' });
+  }
 });
 
-// Add Request Comment
-router.post('/:id/comments', authenticate, (req, res) => {
-  const { comment, is_internal, attachment_url } = req.body;
-  if (!comment) {
-    return res.status(400).json({ error: 'Comment text is required.' });
+// Add Comment to Request
+router.post('/:id/comments', authenticate, async (req, res) => {
+  try {
+    const { comment, attachment_url } = req.body;
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ error: 'Comment text is required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const request = await ClientRequest.findById(req.params.id);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const newComment = {
+      user_id: req.user._id,
+      comment: comment.trim(),
+      attachment_url: attachment_url || null
+    };
+
+    request.comments.push(newComment);
+    await request.save();
+
+    res.status(201).json({ message: 'Comment added successfully' });
+  } catch (err) {
+    console.error('Error adding request comment:', err);
+    res.status(500).json({ error: 'Failed to add comment.' });
   }
-
-  const request = db.prepare('SELECT * FROM client_requests WHERE id = ?').get(req.params.id);
-  if (!request) {
-    return res.status(404).json({ error: 'Request not found' });
-  }
-
-  const internalFlag = req.user.user_type === 'client' ? 0 : (is_internal !== undefined ? (is_internal ? 1 : 0) : 0);
-
-  const result = db.prepare(`
-    INSERT INTO request_comments (request_id, user_id, comment, is_internal, attachment_url)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(request.id, req.user.id, comment, internalFlag, attachment_url || null);
-
-  res.status(201).json({ message: 'Comment added', comment_id: result.lastInsertRowid });
 });
 
 export default router;

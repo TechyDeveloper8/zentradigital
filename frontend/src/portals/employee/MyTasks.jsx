@@ -28,9 +28,9 @@ export default function MyTasks() {
   };
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div className="portal-page-header">
         <div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 4px' }}>
             My Assigned Tasks
@@ -40,9 +40,11 @@ export default function MyTasks() {
           </p>
         </div>
 
-        <button onClick={loadTasks} className="btn btn-secondary">
-          Refresh Tasks
-        </button>
+        <div className="portal-header-actions">
+          <button onClick={loadTasks} className="btn btn-secondary">
+            Refresh Tasks
+          </button>
+        </div>
       </div>
 
       {loading ? (

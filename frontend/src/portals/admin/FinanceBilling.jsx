@@ -108,11 +108,11 @@ export default function FinanceBilling() {
   });
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+      <div className="portal-page-header">
         <div>
-          <h1 style={{ fontSize: '26px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 6px', letterSpacing: '-0.02em' }}>
+          <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 6px', letterSpacing: '-0.02em' }}>
             Agency Billing, Invoices & Subscriptions
           </h1>
           <p style={{ fontSize: '13.5px', color: '#9CA3AF', margin: 0 }}>
@@ -120,18 +120,15 @@ export default function FinanceBilling() {
           </p>
         </div>
 
-        <button onClick={() => setShowInvoiceModal(true)} className="btn btn-primary" style={{ padding: '10px 18px', fontSize: '14px', borderRadius: '10px' }}>
-          <Plus size={16} /> Generate Invoice
-        </button>
+        <div className="portal-header-actions">
+          <button onClick={() => setShowInvoiceModal(true)} className="btn btn-primary" style={{ padding: '10px 18px', fontSize: '14px', borderRadius: '10px' }}>
+            <Plus size={16} /> Generate Invoice
+          </button>
+        </div>
       </div>
 
       {/* Executive Financial Summary KPI Cards */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
-        gap: '16px',
-        marginBottom: '28px'
-      }}>
+      <div className="kpi-grid">
         {/* Total Invoiced */}
         <div className="spotlight-card" style={{ padding: '18px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -358,7 +355,7 @@ export default function FinanceBilling() {
             </div>
             <form onSubmit={handleCreateInvoice}>
               <div className="modal-body">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-2">
                   <div className="form-group">
                     <label className="form-label">Client *</label>
                     <select
@@ -433,7 +430,7 @@ export default function FinanceBilling() {
                   ))}
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                <div className="portal-form-grid-2">
                   <div className="form-group">
                     <label className="form-label">Discount (₹)</label>
                     <input

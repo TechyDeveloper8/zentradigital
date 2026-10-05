@@ -6,15 +6,17 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "seed:mongo": "node db/seed_mongo.js",
+    "reset:mongo": "node db/reset_mongo.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.24.4",
     "multer": "^1.4.5-lts.1",
     "ws": "^8.18.0"
   }

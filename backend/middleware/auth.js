@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
-import db from '../db/database.js';
+import mongoose from 'mongoose';
+import { User, Employee, Client } from '../models/index.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'zentra-enterprise-jwt-secret-key-2026';
 
@@ -7,7 +8,7 @@ export function signToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
 
-export function authenticate(req, res, next) {
+export async function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Authentication required. Please provide a valid Bearer token.' });
@@ -17,40 +18,52 @@ export function authenticate(req, res, next) {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
 
-    // Fetch live user and role details from database
-    const user = db.prepare(`
-      SELECT u.id, u.org_id, u.username, u.email, u.user_type, u.is_active,
-             r.name as role_name, r.display_name as role_display
-      FROM users u
-      JOIN roles r ON u.role_id = r.id
-      WHERE u.id = ?
-    `).get(decoded.id);
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ error: 'Database connection offline.' });
+    }
 
-    if (!user || !user.is_active) {
+    // Fetch live user and role details from MongoDB
+    const userDoc = await User.findById(decoded.id).populate('role_id');
+
+    if (!userDoc || !userDoc.is_active) {
       return res.status(401).json({ error: 'User account is inactive or no longer exists.' });
     }
+
+    const user = {
+      id: userDoc._id.toString(),
+      _id: userDoc._id,
+      org_id: userDoc.org_id,
+      username: userDoc.username,
+      email: userDoc.email,
+      user_type: userDoc.user_type,
+      is_active: userDoc.is_active,
+      role_name: userDoc.role_id?.name,
+      role_display: userDoc.role_id?.display_name
+    };
 
     req.user = user;
     req.employee = null;
     req.clientProfile = null;
+    req.client = null;
 
-    // If employee, attach employee profile
+    // If employee or admin, attach employee profile
     if (user.user_type === 'employee' || user.user_type === 'admin') {
-      const emp = db.prepare(`
-        SELECT e.*, d.name as department_name
-        FROM employees e
-        LEFT JOIN departments d ON e.department_id = d.id
-        WHERE e.user_id = ?
-      `).get(user.id);
-      req.employee = emp || null;
+      const empDoc = await Employee.findOne({ user_id: userDoc._id }).populate('department_id');
+      if (empDoc) {
+        req.employee = {
+          ...empDoc.toJSON(),
+          department_name: empDoc.department_id?.name || null
+        };
+      }
     }
 
     // If client, attach client profile
     if (user.user_type === 'client') {
-      const clientRecord = db.prepare(`
-        SELECT * FROM clients WHERE user_id = ?
-      `).get(user.id);
-      req.clientProfile = clientRecord || null;
+      const clientDoc = await Client.findOne({ user_id: userDoc._id });
+      if (clientDoc) {
+        req.clientProfile = clientDoc.toJSON();
+        req.client = req.clientProfile;
+      }
     }
 
     next();

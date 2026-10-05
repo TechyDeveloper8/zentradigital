@@ -2,41 +2,98 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/client';
-import { Shield, Sparkles, User, Lock, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import {
+  User,
+  Lock,
+  Eye,
+  EyeOff,
+  ArrowRight,
+  Check,
+  AlertCircle,
+  Sparkles,
+  X,
+  CheckCircle2,
+  Mail,
+  KeyRound,
+  ShieldCheck,
+  RefreshCw,
+  Info
+} from 'lucide-react';
+import './Auth.css';
 
 export default function Login() {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('Admin@123');
+  const navigate = useNavigate();
+  const { user, token, loading: authLoading, login, getDashboardPath } = useAuth();
+
+  // Login Form State
+  const [identifier, setIdentifier] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
+  const [touched, setTouched] = useState({ identifier: false, password: false });
+
+  // UI & Feedback State
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [quickUsers, setQuickUsers] = useState([]);
 
-  const { user, token, loading: authLoading, login, getDashboardPath } = useAuth();
-  const navigate = useNavigate();
+  // Interactive Brevo OTP Password Reset State
+  const [showForgotModal, setShowForgotModal] = useState(false);
+  const [forgotStep, setForgotStep] = useState(1); // 1: Email/Username, 2: OTP & New Password, 3: Success
+  const [forgotIdentifier, setForgotIdentifier] = useState('');
+  const [resolvedEmail, setResolvedEmail] = useState('');
+  const [maskedEmail, setMaskedEmail] = useState('');
+  const [forgotOtp, setForgotOtp] = useState('');
+  const [forgotNewPassword, setForgotNewPassword] = useState('');
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
+  const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState('');
+  const [forgotSuccessMsg, setForgotSuccessMsg] = useState('');
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [devOtpNotice, setDevOtpNotice] = useState('');
 
-  // If already authenticated, redirect to user's specific dashboard
+
+  // If already authenticated, redirect to appropriate dashboard
   useEffect(() => {
     if (!authLoading && user && (token || localStorage.getItem('zentra_token'))) {
-      const target = getDashboardPath ? getDashboardPath(user) : (user.role_name === 'admin' ? '/admin' : (user.user_type === 'client' ? '/client' : '/employee'));
+      const target = getDashboardPath
+        ? getDashboardPath(user)
+        : (user.role_name === 'admin' ? '/admin' : (user.user_type === 'client' ? '/client' : '/employee'));
       navigate(target, { replace: true });
     }
   }, [user, token, authLoading, navigate, getDashboardPath]);
 
+  // Load real-time active users (for evaluation/quick switch)
   useEffect(() => {
-    // Fetch test users for quick login switch
     api.get('/auth/quick-users')
       .then(res => setQuickUsers(res || []))
-      .catch(err => console.error(err));
+      .catch(err => console.warn('No active quick-switch users found:', err.message));
   }, []);
 
-  const handleSubmit = async (e) => {
+  // Validation Rules
+  const isValidEmail = (val) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val.trim());
+  const isIdentifierValid = identifier.trim().length >= 3;
+  const isPasswordValid = password.length >= 6;
+
+  // Submit Login
+  const handleLoginSubmit = async (e) => {
     if (e) e.preventDefault();
+    setTouched({ identifier: true, password: true });
+
+    if (!isIdentifierValid || !isPasswordValid) {
+      setError('Please provide a valid username/email and password.');
+      return;
+    }
+
     setError('');
     setLoading(true);
 
     try {
-      const data = await login(username, password);
-      const target = getDashboardPath ? getDashboardPath(data.user) : (data.user.role_name === 'admin' ? '/admin' : (data.user.user_type === 'client' ? '/client' : '/employee'));
+      const data = await login(identifier.trim(), password);
+      const target = getDashboardPath
+        ? getDashboardPath(data.user)
+        : (data.user.role_name === 'admin' ? '/admin' : (data.user.user_type === 'client' ? '/client' : '/employee'));
       navigate(target, { replace: true });
     } catch (err) {
       setError(err.message || 'Invalid username or password.');
@@ -45,245 +102,667 @@ export default function Login() {
     }
   };
 
+  // Quick Select from registered active users
   const handleQuickSelect = async (u, autoLogin = false) => {
-    const pwd = 'Admin@123';
-    setUsername(u.username);
-    setPassword(pwd);
+    setIdentifier(u.username);
+    setPassword('Admin@123');
+    setTouched({ identifier: true, password: true });
+
     if (autoLogin) {
       setError('');
       setLoading(true);
       try {
-        const data = await login(u.username, pwd);
-        const target = getDashboardPath ? getDashboardPath(data.user) : (data.user.role_name === 'admin' ? '/admin' : (data.user.user_type === 'client' ? '/client' : '/employee'));
+        const data = await login(u.username, 'Admin@123');
+        const target = getDashboardPath
+          ? getDashboardPath(data.user)
+          : (data.user.role_name === 'admin' ? '/admin' : (data.user.user_type === 'client' ? '/client' : '/employee'));
         navigate(target, { replace: true });
       } catch (err) {
-        setError(err.message || 'Failed to authenticate quick user.');
+        setError(err.message || 'Failed to authenticate user.');
       } finally {
         setLoading(false);
       }
     }
   };
 
+  // Countdown timer for Brevo OTP resend
+  useEffect(() => {
+    let timer;
+    if (resendCooldown > 0) {
+      timer = setInterval(() => {
+        setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
+
+  const handleOpenForgotModal = () => {
+    setForgotIdentifier(identifier.trim());
+    setForgotStep(1);
+    setForgotError('');
+    setForgotSuccessMsg('');
+    setForgotOtp('');
+    setForgotNewPassword('');
+    setForgotConfirmPassword('');
+    setDevOtpNotice('');
+    setShowForgotModal(true);
+  };
+
+  const handleCloseForgotModal = () => {
+    setShowForgotModal(false);
+    setForgotStep(1);
+    setForgotError('');
+    setForgotSuccessMsg('');
+    setForgotOtp('');
+    setForgotNewPassword('');
+    setForgotConfirmPassword('');
+  };
+
+  const handleRequestOtp = async (e) => {
+    if (e) e.preventDefault();
+    if (!forgotIdentifier.trim()) {
+      setForgotError('Please enter your registered email address or username.');
+      return;
+    }
+    setForgotError('');
+    setForgotLoading(true);
+
+    try {
+      const res = await api.post('/auth/forgot-password', { identifier: forgotIdentifier.trim() });
+      setResolvedEmail(res.email);
+      setMaskedEmail(res.maskedEmail || res.email);
+      setForgotStep(2);
+      setResendCooldown(60);
+      if (res.devOtp) {
+        setDevOtpNotice(`Brevo Verification Code: ${res.devOtp}`);
+      } else {
+        setDevOtpNotice('');
+      }
+      setForgotSuccessMsg(res.message || 'Verification code dispatched to your email.');
+    } catch (err) {
+      setForgotError(err.message || 'Failed to dispatch verification code. Please check your username/email.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (resendCooldown > 0 || forgotLoading) return;
+    setForgotLoading(true);
+    setForgotError('');
+    try {
+      const res = await api.post('/auth/forgot-password', { identifier: forgotIdentifier.trim() });
+      setResendCooldown(60);
+      if (res.devOtp) {
+        setDevOtpNotice(`Brevo Verification Code: ${res.devOtp}`);
+      }
+      setForgotSuccessMsg('A new verification code has been dispatched to your email.');
+    } catch (err) {
+      setForgotError(err.message || 'Failed to resend code.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const handleResetWithOtp = async (e) => {
+    if (e) e.preventDefault();
+    setForgotError('');
+
+    if (!forgotOtp.trim() || !/^\d{6}$/.test(forgotOtp.trim())) {
+      setForgotError('Please enter the complete 6-digit verification code sent to your email.');
+      return;
+    }
+
+    if (!forgotNewPassword || forgotNewPassword.length < 6) {
+      setForgotError('New password must be at least 6 characters long.');
+      return;
+    }
+
+    if (forgotNewPassword !== forgotConfirmPassword) {
+      setForgotError('New passwords do not match. Please verify both fields.');
+      return;
+    }
+
+    setForgotLoading(true);
+
+    try {
+      const res = await api.post('/auth/reset-password-otp', {
+        email: resolvedEmail,
+        otp: forgotOtp.trim(),
+        new_password: forgotNewPassword
+      });
+
+      setForgotStep(3);
+      if (res.username) {
+        setIdentifier(res.username);
+      }
+      setPassword(forgotNewPassword);
+    } catch (err) {
+      setForgotError(err.message || 'Failed to reset password. Please check the code.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+
   return (
-    <div style={{
-      minHeight: '100vh',
-      backgroundColor: '#070A13',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '24px',
-      position: 'relative',
-      overflow: 'hidden'
-    }}>
-      {/* Ambient background glow */}
-      <div style={{
-        position: 'absolute',
-        top: '-15%',
-        left: '-10%',
-        width: '500px',
-        height: '500px',
-        background: 'radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, transparent 70%)',
-        borderRadius: '50%',
-        filter: 'blur(60px)'
-      }} />
+    <div className="auth-page">
+      {/* Big Blurred Zentra Logo in Page Background Center */}
+      <div className="auth-bg-logo-wrap" aria-hidden="true">
+        <img
+          src="/logoofclient/zentra_digital-removebg-preview.png"
+          alt="Zentra Digital Ambient Background Logo"
+          className="auth-bg-logo-img"
+        />
+      </div>
 
-      <div style={{
-        position: 'absolute',
-        bottom: '-15%',
-        right: '-10%',
-        width: '600px',
-        height: '600px',
-        background: 'radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, transparent 70%)',
-        borderRadius: '50%',
-        filter: 'blur(80px)'
-      }} />
+      {/* Ambient Visual Backdrops */}
+      <div className="auth-backdrop-glow-top" />
+      <div className="auth-backdrop-glow-bottom" />
+      <div className="auth-grid-overlay" />
 
-      <div style={{
-        width: '100%',
-        maxWidth: '440px',
-        background: 'rgba(17, 24, 39, 0.85)',
-        backdropFilter: 'blur(16px)',
-        border: '1px solid #1F2937',
-        borderRadius: '20px',
-        padding: '36px 32px',
-        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
-        position: 'relative',
-        zIndex: 1
-      }}>
+      {/* Main Single-Column Login Card */}
+      <div className="auth-card">
+
         {/* Brand Header */}
-        <div style={{ textAlign: 'center', marginBottom: '28px' }}>
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: '52px',
-            height: '52px',
-            borderRadius: '14px',
-            background: 'linear-gradient(135deg, #3B82F6 0%, #1D4ED8 100%)',
-            color: '#fff',
-            marginBottom: '16px',
-            boxShadow: '0 8px 16px rgba(59, 130, 246, 0.3)'
-          }}>
-            <Shield size={28} />
+        <div className="auth-brand">
+          <div className="auth-brand-logo-wrap">
+            <img
+              src="/logoofclient/zentra_digital-removebg-preview.png"
+              alt="Zentra Digital Logo"
+              className="auth-brand-logo-img"
+            />
           </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 6px', letterSpacing: '-0.02em' }}>
-            Zentra Digital ERP
-          </h1>
-          <p style={{ fontSize: '13.5px', color: '#9CA3AF', margin: 0 }}>
-            Unified Agency Operations & Client Collaboration Platform
+          <p className="auth-brand-subtitle">
+            Enterprise Agency Operations & Performance Portal
           </p>
         </div>
 
+        {/* Global Error Banner */}
         {error && (
-          <div style={{
-            background: 'rgba(239, 68, 68, 0.1)',
-            border: '1px solid rgba(239, 68, 68, 0.3)',
-            borderRadius: '10px',
-            padding: '12px 14px',
-            marginBottom: '20px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px',
-            color: '#F87171',
-            fontSize: '13px'
-          }}>
-            <AlertCircle size={18} style={{ flexShrink: 0 }} />
+          <div className="auth-alert">
+            <AlertCircle size={16} style={{ flexShrink: 0 }} />
             <span>{error}</span>
           </div>
         )}
 
-        <form onSubmit={handleSubmit}>
-          <div style={{ marginBottom: '18px' }}>
-            <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: '#D1D5DB', marginBottom: '6px' }}>
-              Username or Email
+        {/* ================= LOGIN FORM ================= */}
+        <form onSubmit={handleLoginSubmit} className="auth-form-animated" noValidate>
+          {/* Email / Username Field */}
+          <div className="auth-field">
+            <label className="auth-label" htmlFor="login-identifier">
+              Email or Username
             </label>
-            <div style={{ position: 'relative' }}>
-              <User size={18} style={{ position: 'absolute', left: '12px', top: '12px', color: '#6B7280' }} />
+            <div className="auth-input-wrapper">
+              <span className="auth-input-icon">
+                <User size={17} />
+              </span>
               <input
+                id="login-identifier"
                 type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                placeholder="admin or user@zentra.com"
-                style={{
-                  width: '100%',
-                  padding: '11px 12px 11px 40px',
-                  backgroundColor: '#111827',
-                  border: '1px solid #374151',
-                  borderRadius: '10px',
-                  color: '#F9FAFB',
-                  fontSize: '14px',
-                  boxSizing: 'border-box'
+                value={identifier}
+                onChange={(e) => {
+                  setIdentifier(e.target.value);
+                  if (!touched.identifier) setTouched(p => ({ ...p, identifier: true }));
                 }}
+                onBlur={() => setTouched(p => ({ ...p, identifier: true }))}
+                placeholder="name@zentradigital.com or username"
+                autoComplete="username"
+                required
+                className={`auth-input ${touched.identifier
+                  ? (isIdentifierValid ? 'is-valid' : 'is-invalid')
+                  : ''
+                  }`}
               />
+              {touched.identifier && (
+                <span className={`auth-input-status-icon ${isIdentifierValid ? 'valid' : 'invalid'}`}>
+                  {isIdentifierValid ? <Check size={16} /> : <AlertCircle size={16} />}
+                </span>
+              )}
             </div>
+            {touched.identifier && !isIdentifierValid && (
+              <div className="auth-field-error-msg">
+                <AlertCircle size={12} /> Minimum 3 characters required
+              </div>
+            )}
           </div>
 
-          <div style={{ marginBottom: '24px' }}>
-            <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: '#D1D5DB', marginBottom: '6px' }}>
+          {/* Password Field with Show/Hide Toggle */}
+          <div className="auth-field">
+            <label className="auth-label" htmlFor="login-password">
               Password
             </label>
-            <div style={{ position: 'relative' }}>
-              <Lock size={18} style={{ position: 'absolute', left: '12px', top: '12px', color: '#6B7280' }} />
+            <div className="auth-input-wrapper">
+              <span className="auth-input-icon">
+                <Lock size={17} />
+              </span>
               <input
-                type="password"
+                id="login-password"
+                type={showPassword ? 'text' : 'password'}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                placeholder="••••••••••••"
-                style={{
-                  width: '100%',
-                  padding: '11px 12px 11px 40px',
-                  backgroundColor: '#111827',
-                  border: '1px solid #374151',
-                  borderRadius: '10px',
-                  color: '#F9FAFB',
-                  fontSize: '14px',
-                  boxSizing: 'border-box'
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (!touched.password) setTouched(p => ({ ...p, password: true }));
                 }}
+                onBlur={() => setTouched(p => ({ ...p, password: true }))}
+                placeholder="Enter your password"
+                autoComplete="current-password"
+                required
+                className={`auth-input ${touched.password
+                  ? (isPasswordValid ? 'is-valid' : 'is-invalid')
+                  : ''
+                  }`}
               />
+              {touched.password && (
+                <span className={`auth-input-status-icon with-toggle ${isPasswordValid ? 'valid' : 'invalid'}`}>
+                  {isPasswordValid ? <Check size={16} /> : <AlertCircle size={16} />}
+                </span>
+              )}
+              <button
+                type="button"
+                className="auth-input-action"
+                onClick={() => setShowPassword(!showPassword)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                title={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
             </div>
+            {touched.password && !isPasswordValid && (
+              <div className="auth-field-error-msg">
+                <AlertCircle size={12} /> Password must be at least 6 characters
+              </div>
+            )}
           </div>
 
+          {/* Additional Controls: Remember Me & Forgot Password */}
+          <div className="auth-controls-row">
+            <label className="auth-checkbox-label">
+              <input
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="auth-checkbox"
+              />
+              <span>Remember me</span>
+            </label>
+
+            <button
+              type="button"
+              className="auth-link"
+              onClick={handleOpenForgotModal}
+            >
+              Forgot Password?
+            </button>
+          </div>
+
+          {/* Submit CTA */}
           <button
             type="submit"
             disabled={loading}
-            style={{
-              width: '100%',
-              padding: '12px',
-              borderRadius: '10px',
-              border: 'none',
-              backgroundColor: '#3B82F6',
-              color: '#FFFFFF',
-              fontWeight: 700,
-              fontSize: '14px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              transition: 'background 0.2s ease',
-              boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)'
-            }}
+            className="auth-submit-btn"
           >
-            {loading ? 'Authenticating...' : (
+            {loading ? (
               <>
-                Sign In to Platform <ArrowRight size={16} />
+                <div className="auth-spinner" />
+                <span>Signing in...</span>
+              </>
+            ) : (
+              <>
+                <span>Sign In to Platform</span>
+                <ArrowRight size={17} />
               </>
             )}
           </button>
         </form>
 
-        {/* Quick Persona Switcher for Evaluation */}
+        {/* Registered Active Accounts (Displayed if accounts exist in MongoDB) */}
         {quickUsers.length > 0 && (
-          <div style={{ marginTop: '28px', paddingTop: '20px', borderTop: '1px solid #1F2937' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '10px' }}>
-              <Sparkles size={14} color="#60A5FA" />
-              <span style={{ fontSize: '12px', fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                Quick Persona Login (Testing)
+          <div className="auth-quick-persona-section">
+            <div className="auth-quick-persona-header">
+              <Sparkles size={13} color="#E50914" />
+              <span className="auth-quick-persona-title">
+                Registered Accounts
               </span>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            <div className="auth-quick-persona-grid">
               {quickUsers.map(u => (
                 <button
                   key={u.id}
                   type="button"
                   onClick={() => handleQuickSelect(u, true)}
-                  title={`Click to instantly sign in as ${u.role_display || u.role_name}`}
-                  style={{
-                    padding: '7px 12px',
-                    borderRadius: '8px',
-                    border: username === u.username ? '1px solid #3B82F6' : '1px solid #374151',
-                    background: username === u.username ? 'rgba(59, 130, 246, 0.2)' : '#1F2937',
-                    color: username === u.username ? '#60A5FA' : '#E5E7EB',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    transition: 'all 0.15s ease'
-                  }}
+                  title={`Click to sign in as ${u.role_display || u.role_name}`}
+                  className={`auth-persona-chip ${identifier === u.username ? 'active' : ''}`}
                 >
                   <span>{u.role_display || u.role_name}</span>
-                  <span style={{ fontSize: '11px', color: '#9CA3AF' }}>({u.username})</span>
+                  <span style={{ fontSize: '10.5px', opacity: 0.65 }}>({u.username})</span>
                 </button>
               ))}
             </div>
           </div>
         )}
 
-        <div style={{ textAlign: 'center', marginTop: '22px' }}>
-          <a
-            href="/"
-            style={{ fontSize: '12.5px', color: '#6B7280', textDecoration: 'none', transition: 'color 0.2s' }}
-            onMouseEnter={e => e.target.style.color = '#9CA3AF'}
-            onMouseLeave={e => e.target.style.color = '#6B7280'}
-          >
+        {/* Footer Return Link */}
+        <div className="auth-footer">
+          <a href="/" className="auth-return-link">
             ← Return to Zentra Digital Marketing Website
           </a>
         </div>
       </div>
+
+      {/* Interactive Brevo OTP Password Reset Modal */}
+      {showForgotModal && (
+        <div className="auth-modal-backdrop" onClick={handleCloseForgotModal}>
+          <div className="auth-modal-card" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="auth-modal-close"
+              onClick={handleCloseForgotModal}
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+
+            {/* Step Progress Pills */}
+            <div className="auth-modal-steps">
+              <div className={`auth-step-pill ${forgotStep >= 1 ? (forgotStep > 1 ? 'completed' : 'active') : ''}`} />
+              <div className={`auth-step-pill ${forgotStep >= 2 ? (forgotStep > 2 ? 'completed' : 'active') : ''}`} />
+              <div className={`auth-step-pill ${forgotStep >= 3 ? 'completed' : ''}`} />
+            </div>
+
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' }}>
+              <div style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '10px',
+                background: 'rgba(229, 9, 20, 0.15)',
+                color: '#E50914',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                border: '1px solid rgba(229, 9, 20, 0.3)',
+                flexShrink: 0
+              }}>
+                {forgotStep === 1 && <Mail size={20} />}
+                {forgotStep === 2 && <KeyRound size={20} />}
+                {forgotStep === 3 && <ShieldCheck size={20} />}
+              </div>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#FFFFFF' }}>
+                  {forgotStep === 1 && 'Reset Password'}
+                  {forgotStep === 2 && 'Enter Verification Code'}
+                  {forgotStep === 3 && 'Password Reset Complete'}
+                </h3>
+                <span style={{ fontSize: '11px', color: '#A1A1AA', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>
+                  {forgotStep === 1 && 'Step 1: Brevo OTP Dispatch'}
+                  {forgotStep === 2 && 'Step 2: Security Validation'}
+                  {forgotStep === 3 && 'Step 3: Ready to Sign In'}
+                </span>
+              </div>
+            </div>
+
+            {/* Error Banner */}
+            {forgotError && (
+              <div className="auth-alert" style={{ marginBottom: '16px' }}>
+                <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                <span style={{ fontSize: '12.5px' }}>{forgotError}</span>
+              </div>
+            )}
+
+            {/* Success / Status Banner */}
+            {forgotSuccessMsg && forgotStep !== 3 && (
+              <div className="auth-alert success" style={{ marginBottom: '16px' }}>
+                <CheckCircle2 size={15} style={{ flexShrink: 0 }} />
+                <span style={{ fontSize: '12.5px' }}>{forgotSuccessMsg}</span>
+              </div>
+            )}
+
+            {/* ================= STEP 1: REQUEST OTP ================= */}
+            {forgotStep === 1 && (
+              <form onSubmit={handleRequestOtp}>
+                <p style={{ fontSize: '13px', color: '#A1A1AA', margin: '0 0 16px 0', lineHeight: 1.5 }}>
+                  Enter your registered username or email. We will dispatch a 6-digit one-time verification code via <strong>Brevo Email Security</strong>.
+                </p>
+
+                <div className="auth-field" style={{ marginBottom: '18px' }}>
+                  <label className="auth-label" htmlFor="forgot-identifier">
+                    Account Email or Username
+                  </label>
+                  <div className="auth-input-wrapper">
+                    <span className="auth-input-icon">
+                      <Mail size={17} />
+                    </span>
+                    <input
+                      id="forgot-identifier"
+                      type="text"
+                      required
+                      value={forgotIdentifier}
+                      onChange={(e) => setForgotIdentifier(e.target.value)}
+                      placeholder="e.g. admin@zentradigital.com or admin"
+                      className="auth-input"
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={forgotLoading || !forgotIdentifier.trim()}
+                  className="auth-submit-btn"
+                  style={{ height: '44px', fontSize: '13.5px' }}
+                >
+                  {forgotLoading ? (
+                    <>
+                      <div className="auth-spinner" />
+                      <span>Dispatching Code via Brevo...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Send Verification Code</span>
+                      <ArrowRight size={16} />
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
+
+            {/* ================= STEP 2: VERIFY OTP & RESET ================= */}
+            {forgotStep === 2 && (
+              <form onSubmit={handleResetWithOtp}>
+                <div style={{
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid #27272A',
+                  borderRadius: '10px',
+                  padding: '12px 14px',
+                  marginBottom: '16px',
+                  fontSize: '12.5px',
+                  color: '#D4D4D8',
+                  lineHeight: 1.5
+                }}>
+                  Verification code dispatched to <strong style={{ color: '#FFFFFF' }}>{maskedEmail}</strong>. Valid for 10 minutes.
+                </div>
+
+                {devOtpNotice && (
+                  <div style={{
+                    background: 'rgba(229, 9, 20, 0.1)',
+                    border: '1px solid rgba(229, 9, 20, 0.4)',
+                    borderRadius: '8px',
+                    padding: '8px 12px',
+                    fontSize: '11.5px',
+                    color: '#FCA5A5',
+                    marginBottom: '14px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}>
+                    <Info size={14} color="#E50914" />
+                    <span>{devOtpNotice}</span>
+                  </div>
+                )}
+
+                {/* 6-Digit OTP Box */}
+                <div className="auth-field" style={{ marginBottom: '16px' }}>
+                  <label className="auth-label" style={{ textAlign: 'center', display: 'block', marginBottom: '8px' }}>
+                    6-Digit Verification Code
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    value={forgotOtp}
+                    onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="••••••"
+                    className="auth-otp-input"
+                    autoFocus
+                    required
+                  />
+                </div>
+
+                {/* New Password */}
+                <div className="auth-field" style={{ marginBottom: '14px' }}>
+                  <label className="auth-label" htmlFor="forgot-new-pwd">
+                    New Password
+                  </label>
+                  <div className="auth-input-wrapper">
+                    <span className="auth-input-icon">
+                      <Lock size={17} />
+                    </span>
+                    <input
+                      id="forgot-new-pwd"
+                      type={showForgotNewPassword ? 'text' : 'password'}
+                      value={forgotNewPassword}
+                      onChange={(e) => setForgotNewPassword(e.target.value)}
+                      placeholder="Minimum 6 characters"
+                      required
+                      className="auth-input"
+                    />
+                    <button
+                      type="button"
+                      className="auth-input-action"
+                      onClick={() => setShowForgotNewPassword(!showForgotNewPassword)}
+                    >
+                      {showForgotNewPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Confirm Password */}
+                <div className="auth-field" style={{ marginBottom: '16px' }}>
+                  <label className="auth-label" htmlFor="forgot-confirm-pwd">
+                    Confirm New Password
+                  </label>
+                  <div className="auth-input-wrapper">
+                    <span className="auth-input-icon">
+                      <Lock size={17} />
+                    </span>
+                    <input
+                      id="forgot-confirm-pwd"
+                      type={showForgotNewPassword ? 'text' : 'password'}
+                      value={forgotConfirmPassword}
+                      onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                      placeholder="Re-type new password"
+                      required
+                      className="auth-input"
+                    />
+                  </div>
+                </div>
+
+                {/* Submit CTA */}
+                <button
+                  type="submit"
+                  disabled={forgotLoading || forgotOtp.length !== 6 || !forgotNewPassword}
+                  className="auth-submit-btn"
+                  style={{ height: '44px', fontSize: '13.5px' }}
+                >
+                  {forgotLoading ? (
+                    <>
+                      <div className="auth-spinner" />
+                      <span>Validating Code & Resetting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Verify Code & Reset Password</span>
+                      <Check size={16} />
+                    </>
+                  )}
+                </button>
+
+                {/* Resend and Navigation Row */}
+                <div className="auth-resend-row">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setForgotStep(1);
+                      setForgotError('');
+                      setForgotSuccessMsg('');
+                    }}
+                    style={{ background: 'none', border: 'none', color: '#A1A1AA', cursor: 'pointer', padding: 0 }}
+                  >
+                    ← Change Account
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={resendCooldown > 0 || forgotLoading}
+                    onClick={handleResendOtp}
+                    className="auth-resend-btn"
+                  >
+                    {resendCooldown > 0 ? (
+                      `Resend code in ${resendCooldown}s`
+                    ) : (
+                      <>
+                        <RefreshCw size={12} />
+                        <span>Resend Code</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* ================= STEP 3: SUCCESS ================= */}
+            {forgotStep === 3 && (
+              <div style={{ textAlign: 'center', padding: '10px 0 6px 0' }}>
+                <div style={{
+                  width: '56px',
+                  height: '56px',
+                  borderRadius: '50%',
+                  backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                  border: '2px solid #10B981',
+                  color: '#10B981',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  margin: '0 auto 16px auto'
+                }}>
+                  <CheckCircle2 size={32} />
+                </div>
+
+                <h4 style={{ margin: '0 0 8px 0', fontSize: '17px', fontWeight: 700, color: '#FFFFFF' }}>
+                  Password Reset Successfully!
+                </h4>
+
+                <p style={{ fontSize: '13px', color: '#A1A1AA', margin: '0 0 20px 0', lineHeight: 1.5 }}>
+                  Your password has been securely updated. Your credentials have been pre-filled on the login screen.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={handleCloseForgotModal}
+                  className="auth-submit-btn"
+                  style={{ height: '44px', fontSize: '13.5px' }}
+                >
+                  <span>Proceed to Sign In</span>
+                  <ArrowRight size={16} />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

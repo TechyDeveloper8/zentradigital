@@ -18,6 +18,12 @@ export default defineConfig({
       '/ws': {
         target: 'ws://localhost:5000',
         ws: true,
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            // Suppress dev-time proxy disconnect errors like ECONNRESET
+          });
+        },
       },
     },
   },

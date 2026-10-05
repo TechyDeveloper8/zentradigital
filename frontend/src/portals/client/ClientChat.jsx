@@ -95,9 +95,9 @@ export default function ClientChat() {
   };
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div className="portal-page-header">
         <div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 4px' }}>
             Agency Communication Center
@@ -108,24 +108,16 @@ export default function ClientChat() {
         </div>
       </div>
 
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '260px 1fr',
-        backgroundColor: 'var(--bg-card)',
-        border: '1px solid var(--border-color)',
-        borderRadius: '16px',
-        height: '75vh',
-        overflow: 'hidden'
-      }}>
+      <div className="portal-chat-container">
         {/* Left: Threads */}
-        <div style={{ borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)', fontWeight: 700, fontSize: '13.5px' }}>
+        <div className="portal-chat-sidebar">
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-color)', fontWeight: 700, fontSize: '13px', display: 'flex', alignItems: 'center', whiteSpace: 'nowrap' }}>
             Communication Streams
           </div>
 
-          <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'inherit', padding: '6px', gap: '6px' }}>
             {chats.length === 0 ? (
-              <div style={{ padding: '20px', textAlign: 'center', color: '#6B7280', fontSize: '12px' }}>
+              <div style={{ padding: '12px', textAlign: 'center', color: '#6B7280', fontSize: '12px', whiteSpace: 'nowrap' }}>
                 No active streams yet.
               </div>
             ) : (
@@ -134,17 +126,21 @@ export default function ClientChat() {
                   key={c.id}
                   onClick={() => setActiveChat(c)}
                   style={{
-                    padding: '10px 12px',
+                    padding: '8px 12px',
                     borderRadius: '8px',
                     cursor: 'pointer',
-                    backgroundColor: activeChat?.id === c.id ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
+                    backgroundColor: activeChat?.id === c.id ? 'rgba(59, 130, 246, 0.15)' : 'rgba(255, 255, 255, 0.03)',
                     color: activeChat?.id === c.id ? '#60A5FA' : '#D1D5DB',
-                    marginBottom: '4px'
+                    whiteSpace: 'nowrap',
+                    border: activeChat?.id === c.id ? '1px solid rgba(59, 130, 246, 0.3)' : '1px solid transparent',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'center'
                   }}
                 >
                   <div style={{ fontSize: '13px', fontWeight: 600 }}>{c.name || 'Account Stream'}</div>
                   {c.last_message && (
-                    <div style={{ fontSize: '11px', color: '#9CA3AF', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                    <div style={{ fontSize: '11px', color: '#9CA3AF', textOverflow: 'ellipsis', overflow: 'hidden', maxWidth: '200px' }}>
                       {c.last_message}
                     </div>
                   )}

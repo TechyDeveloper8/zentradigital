@@ -12,6 +12,13 @@ export default function Employees() {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
 
+  // Admin Role Assignment state (Requirement 1)
+  const [roleModalEmp, setRoleModalEmp] = useState(null);
+  const [selectedRole, setSelectedRole] = useState('marketing_manager');
+  const [customDesignation, setCustomDesignation] = useState('');
+  const [assigningRole, setAssigningRole] = useState(false);
+  const [roleAssignSuccess, setRoleAssignSuccess] = useState('');
+
   // Multi-section employee creation state (Section 7 & 53)
   const [formSection, setFormSection] = useState(1);
   const [newEmp, setNewEmp] = useState({
@@ -57,6 +64,30 @@ export default function Employees() {
       .finally(() => setLoading(false));
   };
 
+  // Admin Role Assignment Handler (Requirement 1)
+  const handleAssignRole = async (e) => {
+    e.preventDefault();
+    if (!roleModalEmp) return;
+    setAssigningRole(true);
+
+    try {
+      const res = await api.put(`/employees/${roleModalEmp.id}/role`, {
+        role_name: selectedRole,
+        designation: customDesignation || undefined
+      });
+
+      setRoleAssignSuccess(`Role successfully assigned to ${roleModalEmp.first_name} ${roleModalEmp.last_name}: ${selectedRole}`);
+      setTimeout(() => setRoleAssignSuccess(''), 5000);
+      setRoleModalEmp(null);
+      setCustomDesignation('');
+      loadEmployees();
+    } catch (err) {
+      alert(err.message || 'Failed to assign role');
+    } finally {
+      setAssigningRole(false);
+    }
+  };
+
   const handleCreateEmployee = async (e) => {
     e.preventDefault();
     try {
@@ -88,22 +119,42 @@ export default function Employees() {
   };
 
   return (
-    <div>
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div className="portal-header-card">
         <div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#F9FAFB', margin: '0 0 4px' }}>
+          <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#FFFFFF', margin: '0 0 4px' }}>
             Employees & Workforce Directory
           </h1>
-          <p style={{ fontSize: '13.5px', color: '#9CA3AF', margin: 0 }}>
+          <p style={{ fontSize: '13.5px', color: '#A1A1AA', margin: 0 }}>
             Manage staff members, role permissions, shifts, and daily reporting configurations.
           </p>
         </div>
 
-        <button onClick={() => setShowAddModal(true)} className="btn btn-primary">
+        <button onClick={() => setShowAddModal(true)} className="btn btn-primary" style={{ backgroundColor: '#E50914', borderColor: '#E50914' }}>
           <Plus size={16} /> Add New Employee
         </button>
       </div>
+
+      {/* Role Assignment Success Toast */}
+      {roleAssignSuccess && (
+        <div style={{
+          backgroundColor: 'rgba(16, 185, 129, 0.15)',
+          border: '1px solid #10B981',
+          color: '#34D399',
+          padding: '12px 18px',
+          borderRadius: '10px',
+          marginBottom: '20px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          fontSize: '13.5px',
+          fontWeight: 600
+        }}>
+          <CheckCircle2 size={18} />
+          {roleAssignSuccess}
+        </div>
+      )}
 
       {/* Employee Directory Table */}
       {loading ? (
@@ -120,9 +171,9 @@ export default function Employees() {
               <tr>
                 <th>Code</th>
                 <th>Employee Name</th>
-                <th>Department & Role</th>
+                <th>Assigned Role</th>
+                <th>Designation & Dept</th>
                 <th>Work Email & Phone</th>
-                <th>Shift Times</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -131,11 +182,22 @@ export default function Employees() {
               {employees.map(emp => (
                 <tr key={emp.id}>
                   <td>
-                    <span style={{ fontWeight: 700, color: '#60A5FA' }}>{emp.employee_code}</span>
+                    <span style={{ fontWeight: 700, color: '#FF4D4D' }}>{emp.employee_code}</span>
                   </td>
                   <td>
                     <div style={{ fontWeight: 600, fontSize: '14px' }}>{emp.first_name} {emp.last_name}</div>
                     <div style={{ fontSize: '11.5px', color: '#9CA3AF' }}>@{emp.username}</div>
+                  </td>
+                  <td>
+                    <span className={`status-badge ${
+                      emp.role_name === 'marketing_manager' ? 'purple' :
+                      (emp.role_name === 'editor' ? 'blue' :
+                      (emp.role_name === 'sales' ? 'green' : 'yellow'))
+                    }`}>
+                      {emp.role_name === 'marketing_manager' ? 'Social Media Manager' :
+                       (emp.role_name === 'editor' ? 'Video Editor' :
+                       (emp.role_name === 'sales' ? 'Sales Executive' : (emp.role_display || emp.role_name)))}
+                    </span>
                   </td>
                   <td>
                     <div style={{ fontSize: '13px' }}>{emp.designation}</div>
@@ -146,30 +208,115 @@ export default function Employees() {
                     <div style={{ fontSize: '11.5px', color: '#9CA3AF' }}>{emp.phone || 'No phone'}</div>
                   </td>
                   <td>
-                    <div style={{ fontSize: '12px', color: '#D1D5DB' }}>{emp.shift_start} - {emp.shift_end}</div>
-                    <div style={{ fontSize: '10.5px', color: '#6B7280' }}>Daily Report: {emp.daily_report_required ? 'Required' : 'No'}</div>
-                  </td>
-                  <td>
                     <span className={`status-badge ${emp.employment_status === 'Active' ? 'green' : 'gray'}`}>
                       {emp.employment_status}
                     </span>
                   </td>
                   <td>
-                    {emp.employment_status === 'Active' && emp.user_id !== 1 && (
+                    <div style={{ display: 'flex', gap: '6px' }}>
                       <button
-                        onClick={() => handleDeactivate(emp)}
+                        onClick={() => {
+                          setRoleModalEmp(emp);
+                          setSelectedRole(emp.role_name || 'marketing_manager');
+                          setCustomDesignation(emp.designation || '');
+                        }}
                         className="btn btn-secondary"
-                        style={{ padding: '4px 8px', fontSize: '11.5px', color: '#F87171' }}
-                        title="Deactivate Employee"
+                        style={{ padding: '4px 8px', fontSize: '11.5px', color: '#60A5FA', borderColor: '#3B82F6', display: 'flex', alignItems: 'center', gap: '4px' }}
+                        title="Assign Specific Role"
                       >
-                        Deactivate
+                        <Shield size={12} /> Assign Role
                       </button>
-                    )}
+
+                      {emp.employment_status === 'Active' && emp.user_id !== 1 && (
+                        <button
+                          onClick={() => handleDeactivate(emp)}
+                          className="btn btn-secondary"
+                          style={{ padding: '4px 8px', fontSize: '11.5px', color: '#F87171' }}
+                          title="Deactivate Employee"
+                        >
+                          Deactivate
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Admin Role Assignment Modal (Requirement 1) */}
+      {roleModalEmp && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '520px' }}>
+            <div className="modal-header">
+              <div>
+                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700 }}>
+                  Assign Employee Role (RBAC)
+                </h3>
+                <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '2px' }}>
+                  {roleModalEmp.first_name} {roleModalEmp.last_name} ({roleModalEmp.employee_code})
+                </div>
+              </div>
+              <button onClick={() => setRoleModalEmp(null)} style={{ background: 'transparent', border: 'none', color: '#9CA3AF', cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <form onSubmit={handleAssignRole}>
+              <div className="modal-body">
+                <div style={{ backgroundColor: '#111827', borderRadius: '10px', padding: '14px', marginBottom: '16px', border: '1px solid #1F2937' }}>
+                  <div style={{ fontSize: '12px', color: '#9CA3AF' }}>Current Role:</div>
+                  <div style={{ fontSize: '14px', fontWeight: 700, color: '#60A5FA', marginTop: '2px' }}>
+                    {roleModalEmp.role_display || roleModalEmp.role_name}
+                  </div>
+                  <div style={{ fontSize: '11.5px', color: '#9CA3AF', marginTop: '4px' }}>
+                    Assigning a new role dynamically updates their dashboard, navigation, and accessible workflows.
+                  </div>
+                </div>
+
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label">Select Assigned Role *</label>
+                  <select
+                    className="form-control"
+                    value={selectedRole}
+                    onChange={e => setSelectedRole(e.target.value)}
+                  >
+                    <option value="marketing_manager">Social Media Manager (Marketing & Social Media Manager)</option>
+                    <option value="editor">Video Editor (Editor / Creative Team)</option>
+                    <option value="sales">Sales Executive (Sales Command Hub)</option>
+                    <option value="admin">Administrator (Full Admin Access)</option>
+                  </select>
+                </div>
+
+                <div className="form-group" style={{ marginBottom: '16px' }}>
+                  <label className="form-label">Custom Designation (Optional)</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    placeholder={
+                      selectedRole === 'marketing_manager' ? 'Social Media & Marketing Manager' :
+                      (selectedRole === 'editor' ? 'Video Editor & Creative Producer' :
+                      (selectedRole === 'sales' ? 'Sales Executive' : 'Administrator'))
+                    }
+                    value={customDesignation}
+                    onChange={e => setCustomDesignation(e.target.value)}
+                  />
+                  <div style={{ fontSize: '11px', color: '#6B7280', marginTop: '4px' }}>
+                    Leave blank to automatically apply the standard title for this role.
+                  </div>
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button type="button" onClick={() => setRoleModalEmp(null)} className="btn btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" disabled={assigningRole} className="btn btn-primary">
+                  {assigningRole ? 'Updating Role...' : 'Save Role Assignment'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

@@ -360,7 +360,7 @@ export default function LeadDetailDrawer({
                       </div>
                       <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
                         <div className="text-xs text-slate-500 font-medium">Assigned Rep</div>
-                        <div className="text-sm font-semibold text-slate-800 mt-0.5">{lead.assigned_employee_name || 'Rahul Sharma'}</div>
+                        <div className="text-sm font-semibold text-slate-800 mt-0.5">{lead.assigned_employee_name || 'Unassigned'}</div>
                         <div className="text-[11px] text-emerald-600 font-medium">Direct Ownership</div>
                       </div>
                       <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">

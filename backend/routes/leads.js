@@ -1,813 +1,1157 @@
 import express from 'express';
-import db, { logAudit, logLeadActivity, createNotification } from '../db/database.js';
+import { Lead, Client, Employee, User, Proposal, Meeting, ClientService, ClientHandover } from '../models/index.js';
+import { logAudit, logLeadActivity, createNotification } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// =========================================================================
-// 1. List Leads with Advanced Filters & Server-Side Pagination (Section 21, 22)
-// =========================================================================
-router.get('/', authenticate, (req, res) => {
-  const {
-    status, stage, assigned_to, source, priority, industry,
-    search, page = 1, limit = 50, quick_filter
-  } = req.query;
+function getTodayDate() {
+  return new Date().toISOString().split('T')[0];
+}
 
-  const pageNum = Math.max(1, parseInt(page, 10));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
-  const offset = (pageNum - 1) * limitNum;
+// 1. List Leads with Advanced Filters & Server-Side Pagination
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const {
+      status, stage, assigned_to, source, priority, industry,
+      search, page = 1, limit = 50, quick_filter
+    } = req.query;
 
-  let baseSql = `
-    FROM leads l
-    LEFT JOIN employees e ON l.assigned_sales_employee_id = e.id
-    LEFT JOIN users u ON l.created_by = u.id
-    LEFT JOIN clients c ON l.converted_client_id = c.id
-    WHERE 1=1
-  `;
-  const params = [];
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
+    const skip = (pageNum - 1) * limitNum;
 
-  // Scoping for Sales Executive
-  if (req.user.role_name === 'sales' && req.employee) {
-    baseSql += ` AND (l.assigned_sales_employee_id = ? OR l.created_by = ?)`;
-    params.push(req.employee.id, req.user.id);
-  }
+    const filter = {};
 
-  const effectiveStatus = status || stage;
-  if (effectiveStatus && effectiveStatus !== 'ALL') {
-    baseSql += ` AND l.status = ?`;
-    params.push(effectiveStatus);
-  }
-
-  if (assigned_to) {
-    baseSql += ` AND l.assigned_sales_employee_id = ?`;
-    params.push(Number(assigned_to));
-  }
-
-  if (source && source !== 'ALL') {
-    baseSql += ` AND l.source = ?`;
-    params.push(source);
-  }
-
-  if (priority && priority !== 'ALL') {
-    baseSql += ` AND l.priority = ?`;
-    params.push(priority);
-  }
-
-  if (industry && industry !== 'ALL') {
-    baseSql += ` AND l.industry = ?`;
-    params.push(industry);
-  }
-
-  // Quick Filter Chips (Section 22)
-  if (quick_filter) {
-    switch (quick_filter.toUpperCase()) {
-      case 'HOT_LEADS':
-        baseSql += ` AND (l.priority IN ('HIGH', 'URGENT') OR l.lead_score >= 80)`;
-        break;
-      case 'HIGH_VALUE':
-        baseSql += ` AND l.deal_value >= 150000`;
-        break;
-      case 'RECENTLY_ADDED':
-        baseSql += ` AND date(l.created_at) >= DATE('now', '-7 days')`;
-        break;
-      case 'PROPOSAL_PENDING':
-        baseSql += ` AND l.status = 'PROPOSAL'`;
-        break;
-      case 'NO_FOLLOW_UP':
-        baseSql += ` AND NOT EXISTS (SELECT 1 FROM lead_follow_ups fu WHERE fu.lead_id = l.id AND fu.status = 'PENDING')`;
-        break;
-      default:
-        break;
+    // Scoping for Sales Executive
+    if (req.user.role_name === 'sales' && req.employee) {
+      filter.$or = [
+        { assigned_sales_employee_id: req.employee._id || req.employee.id },
+        { created_by: req.user._id || req.user.id }
+      ];
     }
+
+    const effectiveStatus = status || stage;
+    if (effectiveStatus && effectiveStatus !== 'ALL') {
+      filter.status = effectiveStatus;
+    }
+
+    if (assigned_to) {
+      filter.assigned_sales_employee_id = assigned_to;
+    }
+
+    if (source && source !== 'ALL') {
+      filter.source = source;
+    }
+
+    if (priority && priority !== 'ALL') {
+      filter.priority = priority;
+    }
+
+    if (industry && industry !== 'ALL') {
+      filter.industry = industry;
+    }
+
+    // Quick Filter Chips
+    if (quick_filter) {
+      const today = new Date();
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(today.getDate() - 7);
+
+      switch (quick_filter.toUpperCase()) {
+        case 'HOT_LEADS':
+          filter.$or = [
+            { priority: { $in: ['HIGH', 'URGENT'] } },
+            { lead_score: { $gte: 80 } }
+          ];
+          break;
+        case 'HIGH_VALUE':
+          filter.deal_value = { $gte: 150000 };
+          break;
+        case 'RECENTLY_ADDED':
+          filter.createdAt = { $gte: sevenDaysAgo };
+          break;
+        case 'PROPOSAL_PENDING':
+          filter.status = 'PROPOSAL';
+          break;
+        case 'NO_FOLLOW_UP':
+          filter['follow_ups.status'] = { $ne: 'PENDING' };
+          break;
+        default:
+          break;
+      }
+    }
+
+    if (search && search.trim()) {
+      const s = search.trim();
+      const regex = new RegExp(s, 'i');
+      filter.$or = [
+        { company_name: regex },
+        { contact_person: regex },
+        { phone: regex },
+        { email: regex },
+        { lead_code: regex }
+      ];
+    }
+
+    const total = await Lead.countDocuments(filter);
+
+    const rawLeads = await Lead.find(filter)
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .populate('created_by', 'username')
+      .populate('converted_client_id', 'client_code')
+      .sort({ _id: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean({ virtuals: true });
+
+    const leads = rawLeads.map(l => {
+      const emp = l.assigned_sales_employee_id || {};
+      const u = l.created_by || {};
+      const c = l.converted_client_id || {};
+
+      // Determine next follow-up and last activity
+      const pendingFollowUps = (l.follow_ups || [])
+        .filter(fu => fu.status === 'PENDING')
+        .sort((a, b) => (a.follow_up_date || '').localeCompare(b.follow_up_date || ''));
+
+      const nextFu = pendingFollowUps[0];
+      const next_follow_up = nextFu ? `${nextFu.follow_up_date} ${nextFu.follow_up_time || ''}`.trim() : null;
+
+      const activities = l.activities || [];
+      const lastAct = activities.length > 0 ? activities[activities.length - 1] : null;
+
+      return {
+        ...l,
+        id: l._id.toString(),
+        assigned_sales_employee_id: emp._id ? emp._id.toString() : (l.assigned_sales_employee_id || null),
+        assigned_employee_name: emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null,
+        created_by_name: u.username || null,
+        converted_client_id: c._id ? c._id.toString() : (l.converted_client_id || null),
+        converted_client_code: c.client_code || null,
+        next_follow_up,
+        last_activity: lastAct?.title || null,
+        last_activity_time: lastAct?.createdAt || lastAct?.created_at || null
+      };
+    });
+
+    // Pipeline counts group by status
+    const countMatch = {};
+    if (req.user.role_name === 'sales' && req.employee) {
+      countMatch.$or = [
+        { assigned_sales_employee_id: req.employee._id || req.employee.id },
+        { created_by: req.user._id || req.user.id }
+      ];
+    }
+
+    const pipelineCountsRaw = await Lead.aggregate([
+      { $match: countMatch },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]);
+
+    const pipelineCounts = pipelineCountsRaw.map(p => ({
+      status: p._id,
+      count: p.count
+    }));
+
+    res.json({
+      leads,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum)
+      },
+      pipelineCounts
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  if (search) {
-    baseSql += ` AND (l.company_name LIKE ? OR l.contact_person LIKE ? OR l.phone LIKE ? OR l.email LIKE ? OR l.lead_code LIKE ?)`;
-    const s = `%${search}%`;
-    params.push(s, s, s, s, s);
-  }
-
-  // Total count
-  const countRow = db.prepare(`SELECT COUNT(*) as total ${baseSql}`).get(...params);
-  const total = countRow ? countRow.total : 0;
-
-  // Selected records
-  const selectSql = `
-    SELECT l.*,
-           e.first_name || ' ' || e.last_name as assigned_employee_name,
-           u.username as created_by_name,
-           c.client_code as converted_client_code,
-           (SELECT fu.follow_up_date || ' ' || coalesce(fu.follow_up_time, '')
-            FROM lead_follow_ups fu
-            WHERE fu.lead_id = l.id AND fu.status = 'PENDING'
-            ORDER BY fu.follow_up_date ASC LIMIT 1) as next_follow_up,
-           (SELECT act.title
-            FROM lead_activities act
-            WHERE act.lead_id = l.id
-            ORDER BY act.id DESC LIMIT 1) as last_activity,
-           (SELECT act.created_at
-            FROM lead_activities act
-            WHERE act.lead_id = l.id
-            ORDER BY act.id DESC LIMIT 1) as last_activity_time
-    ${baseSql}
-    ORDER BY l.id DESC
-    LIMIT ? OFFSET ?
-  `;
-
-  const leads = db.prepare(selectSql).all(...params, limitNum, offset);
-
-  // Group by status counts
-  let countSql = `SELECT status, COUNT(*) as count FROM leads WHERE 1=1`;
-  const countParams = [];
-  if (req.user.role_name === 'sales' && req.employee) {
-    countSql += ` AND (assigned_sales_employee_id = ? OR created_by = ?)`;
-    countParams.push(req.employee.id, req.user.id);
-  }
-  countSql += ` GROUP BY status`;
-  const pipelineCounts = db.prepare(countSql).all(...countParams);
-
-  res.json({
-    leads,
-    pagination: {
-      total,
-      page: pageNum,
-      limit: limitNum,
-      totalPages: Math.ceil(total / limitNum)
-    },
-    pipelineCounts
-  });
 });
 
-// =========================================================================
-// 2. Dedicated Today's & Overdue Follow-ups (Section 10, 11)
-// =========================================================================
-router.get('/follow-ups/today', authenticate, (req, res) => {
-  let sql = `
-    SELECT fu.*,
-           l.company_name, l.contact_person, l.phone, l.lead_code, l.deal_value,
-           e.first_name || ' ' || e.last_name as assigned_employee_name
-    FROM lead_follow_ups fu
-    JOIN leads l ON fu.lead_id = l.id
-    LEFT JOIN employees e ON fu.assigned_employee_id = e.id
-    WHERE fu.follow_up_date = DATE('now')
-  `;
-  const params = [];
+// 2. Today's Follow-ups
+router.get('/follow-ups/today', authenticate, async (req, res) => {
+  try {
+    const today = getTodayDate();
+    const leads = await Lead.find({ 'follow_ups.follow_up_date': today })
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .populate('follow_ups.assigned_employee_id', 'first_name last_name')
+      .lean({ virtuals: true });
 
-  if (req.user.role_name === 'sales' && req.employee) {
-    sql += ` AND (fu.assigned_employee_id = ? OR l.assigned_sales_employee_id = ?)`;
-    params.push(req.employee.id, req.employee.id);
+    let followUps = [];
+    for (const l of leads) {
+      const isSalesScoped = req.user.role_name === 'sales' && req.employee;
+      const empIdStr = (req.employee?._id || req.employee?.id)?.toString();
+
+      for (const fu of (l.follow_ups || [])) {
+        if (fu.follow_up_date === today) {
+          const fuAssigned = fu.assigned_employee_id?._id?.toString() || fu.assigned_employee_id?.toString();
+          const leadAssigned = l.assigned_sales_employee_id?._id?.toString() || l.assigned_sales_employee_id?.toString();
+
+          if (isSalesScoped && fuAssigned !== empIdStr && leadAssigned !== empIdStr) {
+            continue;
+          }
+
+          const fuEmp = fu.assigned_employee_id || l.assigned_sales_employee_id || {};
+          followUps.push({
+            ...fu,
+            id: fu._id.toString(),
+            lead_id: l._id.toString(),
+            company_name: l.company_name,
+            contact_person: l.contact_person,
+            phone: l.phone,
+            lead_code: l.lead_code,
+            deal_value: l.deal_value,
+            assigned_employee_name: fuEmp.first_name ? `${fuEmp.first_name} ${fuEmp.last_name || ''}`.trim() : null
+          });
+        }
+      }
+    }
+
+    followUps.sort((a, b) => {
+      if (a.status === 'PENDING' && b.status !== 'PENDING') return -1;
+      if (a.status !== 'PENDING' && b.status === 'PENDING') return 1;
+      return (a.follow_up_time || '').localeCompare(b.follow_up_time || '');
+    });
+
+    res.json({ followUps });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  sql += ` ORDER BY fu.status = 'PENDING' DESC, fu.follow_up_time ASC, fu.id DESC`;
-  const followUps = db.prepare(sql).all(...params);
-  res.json({ followUps });
 });
 
-router.get('/follow-ups/overdue', authenticate, (req, res) => {
-  let sql = `
-    SELECT fu.*,
-           CAST(julianday('now') - julianday(fu.follow_up_date) AS INTEGER) as days_overdue,
-           l.company_name, l.contact_person, l.phone, l.lead_code, l.deal_value,
-           e.first_name || ' ' || e.last_name as assigned_employee_name
-    FROM lead_follow_ups fu
-    JOIN leads l ON fu.lead_id = l.id
-    LEFT JOIN employees e ON fu.assigned_employee_id = e.id
-    WHERE fu.follow_up_date < DATE('now') AND fu.status = 'PENDING'
-  `;
-  const params = [];
+// Overdue Follow-ups
+router.get('/follow-ups/overdue', authenticate, async (req, res) => {
+  try {
+    const today = getTodayDate();
+    const leads = await Lead.find({
+      'follow_ups.follow_up_date': { $lt: today },
+      'follow_ups.status': 'PENDING'
+    })
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .populate('follow_ups.assigned_employee_id', 'first_name last_name')
+      .lean({ virtuals: true });
 
-  if (req.user.role_name === 'sales' && req.employee) {
-    sql += ` AND (fu.assigned_employee_id = ? OR l.assigned_sales_employee_id = ?)`;
-    params.push(req.employee.id, req.employee.id);
+    let overdueFollowUps = [];
+    const todayTime = new Date(today).getTime();
+
+    for (const l of leads) {
+      const isSalesScoped = req.user.role_name === 'sales' && req.employee;
+      const empIdStr = (req.employee?._id || req.employee?.id)?.toString();
+
+      for (const fu of (l.follow_ups || [])) {
+        if (fu.follow_up_date < today && fu.status === 'PENDING') {
+          const fuAssigned = fu.assigned_employee_id?._id?.toString() || fu.assigned_employee_id?.toString();
+          const leadAssigned = l.assigned_sales_employee_id?._id?.toString() || l.assigned_sales_employee_id?.toString();
+
+          if (isSalesScoped && fuAssigned !== empIdStr && leadAssigned !== empIdStr) {
+            continue;
+          }
+
+          const fuTime = new Date(fu.follow_up_date).getTime();
+          const days_overdue = Math.max(1, Math.round((todayTime - fuTime) / (1000 * 60 * 60 * 24)));
+          const fuEmp = fu.assigned_employee_id || l.assigned_sales_employee_id || {};
+
+          overdueFollowUps.push({
+            ...fu,
+            id: fu._id.toString(),
+            lead_id: l._id.toString(),
+            days_overdue,
+            company_name: l.company_name,
+            contact_person: l.contact_person,
+            phone: l.phone,
+            lead_code: l.lead_code,
+            deal_value: l.deal_value,
+            assigned_employee_name: fuEmp.first_name ? `${fuEmp.first_name} ${fuEmp.last_name || ''}`.trim() : null
+          });
+        }
+      }
+    }
+
+    overdueFollowUps.sort((a, b) => (a.follow_up_date || '').localeCompare(b.follow_up_date || ''));
+
+    res.json({ overdueFollowUps });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
 
-  sql += ` ORDER BY fu.follow_up_date ASC, fu.priority = 'URGENT' DESC, fu.id DESC`;
-  const overdueFollowUps = db.prepare(sql).all(...params);
-  res.json({ overdueFollowUps });
+// Dedicated List all Follow-ups with advanced filtering
+router.get('/follow-ups', authenticate, async (req, res) => {
+  try {
+    const { status, lead_id, date, search, filter } = req.query;
+    const today = getTodayDate();
+
+    const leadQuery = {};
+    if (lead_id) {
+      leadQuery._id = lead_id;
+    }
+
+    const leads = await Lead.find(leadQuery)
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .populate('follow_ups.assigned_employee_id', 'first_name last_name')
+      .lean({ virtuals: true });
+
+    let followUps = [];
+    for (const l of leads) {
+      const isSalesScoped = req.user.role_name === 'sales' && req.employee;
+      const empIdStr = (req.employee?._id || req.employee?.id)?.toString();
+
+      for (const fu of (l.follow_ups || [])) {
+        const fuAssigned = fu.assigned_employee_id?._id?.toString() || fu.assigned_employee_id?.toString();
+        const leadAssigned = l.assigned_sales_employee_id?._id?.toString() || l.assigned_sales_employee_id?.toString();
+
+        if (isSalesScoped && fuAssigned !== empIdStr && leadAssigned !== empIdStr) {
+          continue;
+        }
+
+        if (status && status !== 'ALL' && fu.status !== status) {
+          continue;
+        }
+
+        if (date && fu.follow_up_date !== date) {
+          continue;
+        }
+
+        if (filter === 'today' && fu.follow_up_date !== today) {
+          continue;
+        } else if (filter === 'overdue' && !(fu.follow_up_date < today && fu.status === 'PENDING')) {
+          continue;
+        } else if (filter === 'upcoming' && !(fu.follow_up_date > today && fu.status === 'PENDING')) {
+          continue;
+        }
+
+        if (search) {
+          const s = search.toLowerCase();
+          const matchCompany = l.company_name?.toLowerCase().includes(s);
+          const matchPerson = l.contact_person?.toLowerCase().includes(s);
+          const matchSummary = fu.discussion_summary?.toLowerCase().includes(s);
+          if (!matchCompany && !matchPerson && !matchSummary) {
+            continue;
+          }
+        }
+
+        const fuEmp = fu.assigned_employee_id || l.assigned_sales_employee_id || {};
+        followUps.push({
+          ...fu,
+          id: fu._id.toString(),
+          lead_id: l._id.toString(),
+          company_name: l.company_name,
+          contact_person: l.contact_person,
+          phone: l.phone,
+          lead_code: l.lead_code,
+          deal_value: l.deal_value,
+          lead_status: l.status,
+          assigned_employee_name: fuEmp.first_name ? `${fuEmp.first_name} ${fuEmp.last_name || ''}`.trim() : null
+        });
+      }
+    }
+
+    followUps.sort((a, b) => (a.follow_up_date || '').localeCompare(b.follow_up_date || ''));
+
+    res.json({ followUps });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create follow-up with body lead_id
+router.post('/follow-ups', authenticate, async (req, res) => {
+  try {
+    const {
+      lead_id, follow_up_date, follow_up_time, contact_method, discussion_summary,
+      client_requirement, next_action, next_follow_up_date, priority, reminder, status
+    } = req.body;
+
+    if (!lead_id || !follow_up_date || !contact_method || !discussion_summary) {
+      return res.status(400).json({ error: 'Lead, date, contact method, and discussion summary / notes are required.' });
+    }
+
+    const lead = await Lead.findById(lead_id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const assignedEmp = req.employee ? (req.employee._id || req.employee.id) : lead.assigned_sales_employee_id;
+
+    const followUpDoc = {
+      follow_up_date,
+      follow_up_time: follow_up_time || '14:00',
+      contact_method,
+      follow_up_type: contact_method || 'Call',
+      discussion_summary,
+      notes: discussion_summary,
+      client_requirement: client_requirement || '',
+      next_action: next_action || '',
+      next_follow_up_date: next_follow_up_date || null,
+      assigned_employee_id: assignedEmp,
+      performed_by: req.employee ? (req.employee._id || req.employee.id) : null,
+      priority: priority || 'MEDIUM',
+      reminder: reminder !== undefined ? !!reminder : true,
+      status: status || 'PENDING'
+    };
+
+    lead.follow_ups.push(followUpDoc);
+
+    if (lead.status === 'NEW') {
+      lead.status = 'CONTACTED';
+      lead.stage_updated_at = new Date();
+    }
+
+    await lead.save();
+
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
+      activityType: 'FOLLOW_UP_SCHEDULED',
+      title: `${contact_method} Follow-up Scheduled`,
+      description: `Scheduled for ${follow_up_date} at ${follow_up_time || '14:00'}. Notes: ${discussion_summary}`,
+      performedBy: assignedEmp
+    });
+
+    const newFollowUp = lead.follow_ups[lead.follow_ups.length - 1];
+
+    res.status(201).json({
+      message: 'Follow-up created successfully',
+      follow_up: {
+        ...newFollowUp.toObject(),
+        id: newFollowUp._id.toString(),
+        company_name: lead.company_name,
+        contact_person: lead.contact_person
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Update Follow-Up (Complete, Reschedule, Add Note)
-router.put('/follow-ups/:id', authenticate, (req, res) => {
-  const followUp = db.prepare('SELECT * FROM lead_follow_ups WHERE id = ?').get(req.params.id);
-  if (!followUp) {
-    return res.status(404).json({ error: 'Follow-up not found' });
-  }
+router.put('/follow-ups/:id', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findOne({ 'follow_ups._id': req.params.id });
+    if (!lead) {
+      return res.status(404).json({ error: 'Follow-up not found' });
+    }
 
-  const {
-    status, follow_up_date, follow_up_time, discussion_summary,
-    next_action, next_follow_up_date, contact_method
-  } = req.body;
+    const followUp = lead.follow_ups.id(req.params.id);
+    const {
+      status, follow_up_date, follow_up_time, discussion_summary,
+      next_action, next_follow_up_date, contact_method
+    } = req.body;
 
-  db.prepare(`
-    UPDATE lead_follow_ups SET
-      status = coalesce(?, status),
-      follow_up_date = coalesce(?, follow_up_date),
-      follow_up_time = coalesce(?, follow_up_time),
-      discussion_summary = coalesce(?, discussion_summary),
-      next_action = coalesce(?, next_action),
-      next_follow_up_date = coalesce(?, next_follow_up_date),
-      contact_method = coalesce(?, contact_method)
-    WHERE id = ?
-  `).run(
-    status, follow_up_date, follow_up_time, discussion_summary,
-    next_action, next_follow_up_date, contact_method, followUp.id
-  );
+    const oldStatus = followUp.status;
+    const oldDate = followUp.follow_up_date;
 
-  // Log lead activity
-  if (status === 'COMPLETED' && followUp.status !== 'COMPLETED') {
-    logLeadActivity({
-      leadId: followUp.lead_id,
-      activityType: 'FOLLOW_UP_COMPLETED',
-      title: `${followUp.contact_method} Follow-up Completed`,
-      description: discussion_summary || followUp.discussion_summary,
-      performedBy: req.employee ? req.employee.id : null
-    });
-  } else if (follow_up_date && follow_up_date !== followUp.follow_up_date) {
-    logLeadActivity({
-      leadId: followUp.lead_id,
-      activityType: 'FOLLOW_UP_SCHEDULED',
-      title: 'Follow-up Rescheduled',
-      description: `Rescheduled to ${follow_up_date} at ${follow_up_time || followUp.follow_up_time}. Action: ${next_action || followUp.next_action || 'Discussion'}`,
-      performedBy: req.employee ? req.employee.id : null
-    });
-  }
+    if (status) followUp.status = status;
+    if (follow_up_date) followUp.follow_up_date = follow_up_date;
+    if (follow_up_time) followUp.follow_up_time = follow_up_time;
+    if (discussion_summary) {
+      followUp.discussion_summary = discussion_summary;
+      followUp.notes = discussion_summary;
+    }
+    if (next_action) followUp.next_action = next_action;
+    if (next_follow_up_date) followUp.next_follow_up_date = next_follow_up_date;
+    if (contact_method) {
+      followUp.contact_method = contact_method;
+      followUp.follow_up_type = contact_method;
+    }
 
-  const updated = db.prepare('SELECT * FROM lead_follow_ups WHERE id = ?').get(followUp.id);
-  res.json({ message: 'Follow-up updated successfully', follow_up: updated });
-});
+    if (status === 'COMPLETED') {
+      followUp.completed_at = new Date();
+    }
 
-// =========================================================================
-// 3. Single Lead Detail with Full 360 Records (Section 14)
-// =========================================================================
-router.get('/:id', authenticate, (req, res) => {
-  const lead = db.prepare(`
-    SELECT l.*,
-           e.first_name || ' ' || e.last_name as assigned_employee_name,
-           u.username as created_by_name,
-           c.client_code as converted_client_code
-    FROM leads l
-    LEFT JOIN employees e ON l.assigned_sales_employee_id = e.id
-    LEFT JOIN users u ON l.created_by = u.id
-    LEFT JOIN clients c ON l.converted_client_id = c.id
-    WHERE l.id = ?
-  `).get(req.params.id);
+    await lead.save();
 
-  if (!lead) {
-    return res.status(404).json({ error: 'Lead not found' });
-  }
-
-  const followUps = db.prepare(`
-    SELECT fu.*, e.first_name || ' ' || e.last_name as assigned_name
-    FROM lead_follow_ups fu
-    LEFT JOIN employees e ON fu.assigned_employee_id = e.id
-    WHERE fu.lead_id = ?
-    ORDER BY fu.follow_up_date DESC, fu.id DESC
-  `).all(lead.id);
-
-  const proposals = db.prepare(`
-    SELECT * FROM proposals WHERE lead_id = ? ORDER BY id DESC
-  `).all(lead.id);
-
-  const meetings = db.prepare(`
-    SELECT m.*, e.first_name || ' ' || e.last_name as assigned_employee_name
-    FROM meetings m
-    LEFT JOIN employees e ON m.assigned_employee_id = e.id
-    WHERE m.lead_id = ?
-    ORDER BY m.meeting_date DESC, m.meeting_time DESC
-  `).all(lead.id);
-
-  const activities = db.prepare(`
-    SELECT act.*, e.first_name || ' ' || e.last_name as performed_by_name
-    FROM lead_activities act
-    LEFT JOIN employees e ON act.performed_by = e.id
-    WHERE act.lead_id = ?
-    ORDER BY act.created_at DESC, act.id DESC
-  `).all(lead.id);
-
-  res.json({ lead, followUps, proposals, meetings, activities });
-});
-
-// =========================================================================
-// 4. Create Lead (Section 8: 6-Step Multi-Step Form)
-// =========================================================================
-router.post('/', authenticate, requireRole(['admin', 'sales', 'marketing_manager']), (req, res) => {
-  const {
-    company_name, contact_person, designation, phone, whatsapp, email, website,
-    city, state, country = 'India',
-    industry, business_type, company_size, product_service, target_market, target_location, competitors, current_marketing_method,
-    services_required, requirement, main_business_problem, desired_outcome, expected_start_date, existing_agency, urgency = 'Medium',
-    deal_value, budget_range, billing_type = 'Monthly', expected_contract_duration, decision_maker, purchase_timeline, pricing_sensitivity,
-    source, lead_type = 'Inbound', priority = 'MEDIUM', assigned_sales_employee_id, first_follow_up_date, lead_score = 50, notes,
-    initial_follow_up
-  } = req.body;
-
-  if (!company_name || !contact_person || !phone || !source) {
-    return res.status(400).json({ error: 'Company Name, Contact Person, Phone Number, and Lead Source are mandatory.' });
-  }
-
-  const currentYear = new Date().getFullYear();
-  const count = db.prepare('SELECT COUNT(*) as count FROM leads').get().count + 1;
-  const lead_code = `LEAD-${currentYear}-${String(count).padStart(4, '0')}`;
-  const lead_date = new Date().toISOString().split('T')[0];
-
-  const assignedEmpId = assigned_sales_employee_id || (req.employee ? req.employee.id : null);
-
-  const stmt = db.prepare(`
-    INSERT INTO leads (
-      lead_code, lead_date, company_name, contact_person, designation, phone, whatsapp,
-      email, website, city, state, country,
-      industry, business_type, company_size, product_service, target_market, target_location, competitors, current_marketing_method,
-      services_required, requirement, main_business_problem, desired_outcome, expected_start_date, existing_agency, urgency,
-      deal_value, budget_range, billing_type, expected_contract_duration, decision_maker, purchase_timeline, pricing_sensitivity,
-      source, lead_type, priority, assigned_sales_employee_id, first_follow_up_date, lead_score, notes, status, created_by
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?, 'NEW', ?
-    )
-  `);
-
-  const servicesStr = Array.isArray(services_required)
-    ? JSON.stringify(services_required)
-    : (services_required || '');
-
-  const result = stmt.run(
-    lead_code, lead_date, company_name, contact_person, designation || 'Owner', phone, whatsapp || phone,
-    email || '', website || '', city || '', state || '', country || 'India',
-    industry || 'General Business', business_type || '', company_size || '', product_service || '', target_market || '', target_location || '', competitors || '', current_marketing_method || '',
-    servicesStr, requirement || '', main_business_problem || '', desired_outcome || '', expected_start_date || null, existing_agency || '', urgency,
-    Number(deal_value || 50000), budget_range || '₹50,000 - ₹1,00,000 / month', billing_type, expected_contract_duration || '6 Months', decision_maker || contact_person, purchase_timeline || 'Immediate', pricing_sensitivity || 'Normal',
-    source, lead_type, priority, assignedEmpId, first_follow_up_date || null, Number(lead_score || 50), notes || '', req.user.id
-  );
-
-  const leadId = result.lastInsertRowid;
-
-  // Record initial activity
-  logLeadActivity({
-    leadId,
-    activityType: 'LEAD_CREATED',
-    title: 'Lead Created',
-    description: `New lead created from ${source} with deal estimate of ₹${Number(deal_value || 50000).toLocaleString()}`,
-    performedBy: assignedEmpId
-  });
-
-  // Optional: create immediate initial follow-up if provided
-  if (initial_follow_up && initial_follow_up.follow_up_date) {
-    db.prepare(`
-      INSERT INTO lead_follow_ups (
-        lead_id, follow_up_date, follow_up_time, contact_method, discussion_summary,
-        next_action, assigned_employee_id, priority, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-    `).run(
-      leadId,
-      initial_follow_up.follow_up_date,
-      initial_follow_up.follow_up_time || '11:00',
-      initial_follow_up.contact_method || 'Phone',
-      initial_follow_up.discussion_summary || 'Initial prospect connection call',
-      initial_follow_up.next_action || 'Introductory pitch',
-      assignedEmpId,
-      priority
-    );
-
-    logLeadActivity({
-      leadId,
-      activityType: 'FOLLOW_UP_SCHEDULED',
-      title: 'First Follow-Up Scheduled',
-      description: `${initial_follow_up.contact_method || 'Phone'} call scheduled for ${initial_follow_up.follow_up_date}`,
-      performedBy: assignedEmpId
-    });
-  }
-
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'leads',
-    entityId: leadId,
-    newValue: { lead_code, company_name, contact_person, source, priority, deal_value: deal_value || 50000 },
-    ip: req.ip
-  });
-
-  const created = db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId);
-  res.status(201).json({ message: 'Lead created successfully', lead: created });
-});
-
-// =========================================================================
-// 5. Update Pipeline Stage (Section 7: Drag & Drop / Stage Progression)
-// =========================================================================
-router.put('/:id/stage', authenticate, (req, res) => {
-  const { stage, notes } = req.body;
-  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
-  if (!lead) {
-    return res.status(404).json({ error: 'Lead not found' });
-  }
-
-  const ALLOWED_STAGES = ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST', 'ON HOLD'];
-  if (!ALLOWED_STAGES.includes(stage)) {
-    return res.status(400).json({ error: `Invalid stage: ${stage}` });
-  }
-
-  const oldStage = lead.status;
-
-  db.prepare(`
-    UPDATE leads SET
-      status = ?,
-      notes = coalesce(?, notes),
-      stage_updated_at = CURRENT_TIMESTAMP,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(stage, notes, lead.id);
-
-  // Log activity
-  logLeadActivity({
-    leadId: lead.id,
-    activityType: 'STAGE_CHANGED',
-    title: `Stage Changed: ${oldStage} → ${stage}`,
-    description: notes || `Opportunity advanced from ${oldStage} to ${stage}`,
-    performedBy: req.employee ? req.employee.id : null
-  });
-
-  // If assigned to another sales employee, notify them
-  if (lead.assigned_sales_employee_id && (!req.employee || req.employee.id !== lead.assigned_sales_employee_id)) {
-    const empUser = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(lead.assigned_sales_employee_id);
-    if (empUser) {
-      createNotification({
-        userId: empUser.user_id,
-        type: 'STAGE_CHANGED',
-        title: 'Lead Stage Updated',
-        message: `${lead.company_name} stage updated to ${stage}`,
-        relatedEntity: 'leads',
-        relatedEntityId: lead.id
+    if (status === 'COMPLETED' && oldStatus !== 'COMPLETED') {
+      await logLeadActivity({
+        leadId: lead._id || lead.id,
+        activityType: 'FOLLOW_UP_COMPLETED',
+        title: `${followUp.contact_method} Follow-up Completed`,
+        description: discussion_summary || followUp.discussion_summary,
+        performedBy: req.employee ? (req.employee._id || req.employee.id) : null
+      });
+    } else if (follow_up_date && follow_up_date !== oldDate) {
+      await logLeadActivity({
+        leadId: lead._id || lead.id,
+        activityType: 'FOLLOW_UP_SCHEDULED',
+        title: 'Follow-up Rescheduled',
+        description: `Rescheduled to ${follow_up_date} at ${follow_up_time || followUp.follow_up_time}. Action: ${next_action || followUp.next_action || 'Discussion'}`,
+        performedBy: req.employee ? (req.employee._id || req.employee.id) : null
       });
     }
+
+    res.json({
+      message: 'Follow-up updated successfully',
+      follow_up: {
+        ...followUp.toObject(),
+        id: followUp._id.toString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  logAudit({
-    userId: req.user.id,
-    action: 'STAGE_CHANGED',
-    entity: 'leads',
-    entityId: lead.id,
-    oldValue: { status: oldStage },
-    newValue: { status: stage, notes },
-    ip: req.ip
-  });
-
-  const updated = db.prepare('SELECT * FROM leads WHERE id = ?').get(lead.id);
-  res.json({ message: `Lead stage updated to ${stage}`, lead: updated });
 });
 
-// =========================================================================
-// 6. Lead Qualification API (Section 9)
-// =========================================================================
-router.put('/:id/qualify', authenticate, (req, res) => {
-  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
-  if (!lead) {
-    return res.status(404).json({ error: 'Lead not found' });
+// 3. Single Lead Detail with Full 360 Records
+router.get('/:id', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id)
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .populate('created_by', 'username')
+      .populate('converted_client_id', 'client_code')
+      .populate('follow_ups.assigned_employee_id', 'first_name last_name')
+      .populate('activities.performed_by', 'first_name last_name')
+      .lean({ virtuals: true });
+
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    lead.id = lead._id.toString();
+    const emp = lead.assigned_sales_employee_id || {};
+    lead.assigned_employee_name = emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null;
+    lead.created_by_name = lead.created_by?.username || null;
+    lead.converted_client_code = lead.converted_client_id?.client_code || null;
+
+    const followUps = (lead.follow_ups || []).map(fu => {
+      const aEmp = fu.assigned_employee_id || {};
+      return {
+        ...fu,
+        id: fu._id.toString(),
+        assigned_name: aEmp.first_name ? `${aEmp.first_name} ${aEmp.last_name || ''}`.trim() : null
+      };
+    }).sort((a, b) => (b.follow_up_date || '').localeCompare(a.follow_up_date || ''));
+
+    const activities = (lead.activities || []).map(act => {
+      const pEmp = act.performed_by || {};
+      return {
+        ...act,
+        id: act._id.toString(),
+        performed_by_name: pEmp.first_name ? `${pEmp.first_name} ${pEmp.last_name || ''}`.trim() : null
+      };
+    }).reverse();
+
+    const proposals = await Proposal.find({ lead_id: lead._id })
+      .sort({ createdAt: -1 })
+      .lean({ virtuals: true });
+
+    const formattedProposals = proposals.map(p => ({ ...p, id: p._id.toString() }));
+
+    const meetings = await Meeting.find({ lead_id: lead._id })
+      .populate('assigned_employee_id', 'first_name last_name')
+      .sort({ meeting_date: -1, meeting_time: -1 })
+      .lean({ virtuals: true });
+
+    const formattedMeetings = meetings.map(m => ({
+      ...m,
+      id: m._id.toString(),
+      assigned_employee_name: m.assigned_employee_id?.first_name
+        ? `${m.assigned_employee_id.first_name} ${m.assigned_employee_id.last_name || ''}`.trim()
+        : null
+    }));
+
+    res.json({
+      lead,
+      followUps,
+      proposals: formattedProposals,
+      meetings: formattedMeetings,
+      activities
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const {
-    qualification_data, qualification_status, lead_score, deal_value
-  } = req.body;
-
-  const qDataStr = typeof qualification_data === 'object'
-    ? JSON.stringify(qualification_data)
-    : (qualification_data || '');
-
-  let newStatus = lead.status;
-  if (qualification_status === 'Qualified' && (lead.status === 'NEW' || lead.status === 'CONTACTED')) {
-    newStatus = 'QUALIFIED';
-  } else if (qualification_status === 'Unqualified') {
-    newStatus = 'LOST';
-  }
-
-  db.prepare(`
-    UPDATE leads SET
-      qualification_data = ?,
-      qualification_status = coalesce(?, qualification_status),
-      lead_score = coalesce(?, lead_score),
-      deal_value = coalesce(?, deal_value),
-      status = ?,
-      stage_updated_at = CURRENT_TIMESTAMP,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    qDataStr,
-    qualification_status,
-    lead_score !== undefined ? Number(lead_score) : lead.lead_score,
-    deal_value !== undefined ? Number(deal_value) : lead.deal_value,
-    newStatus,
-    lead.id
-  );
-
-  logLeadActivity({
-    leadId: lead.id,
-    activityType: 'QUALIFICATION_UPDATED',
-    title: `Lead Qualification: ${qualification_status || 'Updated'}`,
-    description: `Lead scored at ${lead_score || lead.lead_score}. Status set to ${qualification_status}.`,
-    performedBy: req.employee ? req.employee.id : null
-  });
-
-  logAudit({
-    userId: req.user.id,
-    action: 'LEAD_QUALIFIED',
-    entity: 'leads',
-    entityId: lead.id,
-    newValue: { qualification_status, lead_score },
-    ip: req.ip
-  });
-
-  const updated = db.prepare('SELECT * FROM leads WHERE id = ?').get(lead.id);
-  res.json({ message: 'Lead qualification updated successfully', lead: updated });
 });
 
-// =========================================================================
-// 7. Lead Activity Timeline & Logging (Section 13)
-// =========================================================================
-router.get('/:id/activities', authenticate, (req, res) => {
-  const activities = db.prepare(`
-    SELECT act.*, e.first_name || ' ' || e.last_name as performed_by_name
-    FROM lead_activities act
-    LEFT JOIN employees e ON act.performed_by = e.id
-    WHERE act.lead_id = ?
-    ORDER BY act.created_at DESC, act.id DESC
-  `).all(req.params.id);
+// 4. Create Lead (Multi-Step Form)
+router.post('/', authenticate, requireRole(['admin', 'sales', 'marketing_manager']), async (req, res) => {
+  try {
+    const {
+      company_name, contact_person, designation, phone, whatsapp, email, website,
+      city, state, country = 'India',
+      industry, business_type, company_size, product_service, target_market, target_location, competitors, current_marketing_method,
+      services_required, requirement, main_business_problem, desired_outcome, expected_start_date, existing_agency, urgency = 'Medium',
+      deal_value, budget_range, billing_type = 'Monthly', expected_contract_duration, decision_maker, purchase_timeline, pricing_sensitivity,
+      source, lead_type = 'Inbound', priority = 'MEDIUM', assigned_sales_employee_id, first_follow_up_date, lead_score = 50, notes,
+      initial_follow_up
+    } = req.body;
 
-  res.json({ activities });
+    if (!company_name || !contact_person || !phone || !source) {
+      return res.status(400).json({ error: 'Company Name, Contact Person, Phone Number, and Lead Source are mandatory.' });
+    }
+
+    const currentYear = new Date().getFullYear();
+    const count = await Lead.countDocuments() + 1;
+    const lead_code = `LEAD-${currentYear}-${String(count).padStart(4, '0')}`;
+    const lead_date = getTodayDate();
+
+    const assignedEmpId = assigned_sales_employee_id || (req.employee ? (req.employee._id || req.employee.id) : null);
+
+    const follow_ups = [];
+    if (initial_follow_up && initial_follow_up.follow_up_date) {
+      follow_ups.push({
+        follow_up_date: initial_follow_up.follow_up_date,
+        follow_up_time: initial_follow_up.follow_up_time || '11:00',
+        contact_method: initial_follow_up.contact_method || 'Phone',
+        follow_up_type: initial_follow_up.contact_method || 'Call',
+        discussion_summary: initial_follow_up.discussion_summary || 'Initial prospect connection call',
+        notes: initial_follow_up.discussion_summary || 'Initial prospect connection call',
+        next_action: initial_follow_up.next_action || 'Introductory pitch',
+        assigned_employee_id: assignedEmpId,
+        priority: priority || 'MEDIUM',
+        status: 'PENDING'
+      });
+    }
+
+    const newLead = await Lead.create({
+      lead_code,
+      lead_date,
+      company_name,
+      contact_person,
+      designation: designation || 'Owner',
+      phone,
+      whatsapp: whatsapp || phone,
+      email: email || '',
+      website: website || '',
+      city: city || '',
+      state: state || '',
+      country: country || 'India',
+      industry: industry || 'General Business',
+      business_type: business_type || '',
+      company_size: company_size || '',
+      product_service: product_service || '',
+      target_market: target_market || '',
+      target_location: target_location || '',
+      competitors: competitors || '',
+      current_marketing_method: current_marketing_method || '',
+      services_required,
+      requirement: requirement || '',
+      main_business_problem: main_business_problem || '',
+      desired_outcome: desired_outcome || '',
+      expected_start_date: expected_start_date || null,
+      existing_agency: existing_agency || '',
+      urgency,
+      deal_value: Number(deal_value || 50000),
+      budget_range: budget_range || '₹50,000 - ₹1,00,000 / month',
+      billing_type,
+      expected_contract_duration: expected_contract_duration || '6 Months',
+      decision_maker: decision_maker || contact_person,
+      purchase_timeline: purchase_timeline || 'Immediate',
+      pricing_sensitivity: pricing_sensitivity || 'Normal',
+      source,
+      lead_type,
+      priority,
+      assigned_sales_employee_id: assignedEmpId,
+      first_follow_up_date: first_follow_up_date || null,
+      lead_score: Number(lead_score || 50),
+      notes: notes || '',
+      status: 'NEW',
+      created_by: req.user._id || req.user.id,
+      follow_ups
+    });
+
+    await logLeadActivity({
+      leadId: newLead._id || newLead.id,
+      activityType: 'LEAD_CREATED',
+      title: 'Lead Created',
+      description: `New lead created from ${source} with deal estimate of ₹${Number(deal_value || 50000).toLocaleString()}`,
+      performedBy: assignedEmpId
+    });
+
+    if (initial_follow_up && initial_follow_up.follow_up_date) {
+      await logLeadActivity({
+        leadId: newLead._id || newLead.id,
+        activityType: 'FOLLOW_UP_SCHEDULED',
+        title: 'First Follow-Up Scheduled',
+        description: `${initial_follow_up.contact_method || 'Phone'} call scheduled for ${initial_follow_up.follow_up_date}`,
+        performedBy: assignedEmpId
+      });
+    }
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'CREATED',
+      entity: 'leads',
+      entityId: newLead._id || newLead.id,
+      newValue: { lead_code, company_name, contact_person, source, priority, deal_value: deal_value || 50000 },
+      ip: req.ip
+    });
+
+    res.status(201).json({
+      message: 'Lead created successfully',
+      lead: {
+        ...newLead.toObject(),
+        id: newLead._id.toString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-router.post('/:id/activities', authenticate, (req, res) => {
-  const lead = db.prepare('SELECT id, company_name FROM leads WHERE id = ?').get(req.params.id);
-  if (!lead) {
-    return res.status(404).json({ error: 'Lead not found' });
+// 5. Update Pipeline Stage
+router.put('/:id/stage', authenticate, async (req, res) => {
+  try {
+    const { stage, notes } = req.body;
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const ALLOWED_STAGES = ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST', 'ON HOLD'];
+    if (!ALLOWED_STAGES.includes(stage)) {
+      return res.status(400).json({ error: `Invalid stage: ${stage}` });
+    }
+
+    const oldStage = lead.status;
+    lead.status = stage;
+    if (notes) lead.notes = notes;
+    lead.stage_updated_at = new Date();
+    await lead.save();
+
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
+      activityType: 'STAGE_CHANGED',
+      title: `Stage Changed: ${oldStage} → ${stage}`,
+      description: notes || `Opportunity advanced from ${oldStage} to ${stage}`,
+      performedBy: req.employee ? (req.employee._id || req.employee.id) : null
+    });
+
+    // Notify assigned sales employee if different from current user
+    if (lead.assigned_sales_employee_id && (!req.employee || (req.employee._id || req.employee.id).toString() !== lead.assigned_sales_employee_id.toString())) {
+      const emp = await Employee.findById(lead.assigned_sales_employee_id);
+      if (emp && emp.user_id) {
+        await createNotification({
+          userId: emp.user_id,
+          type: 'STAGE_CHANGED',
+          title: 'Lead Stage Updated',
+          message: `${lead.company_name} stage updated to ${stage}`,
+          relatedEntity: 'leads',
+          relatedEntityId: lead._id
+        });
+      }
+    }
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'STAGE_CHANGED',
+      entity: 'leads',
+      entityId: lead._id || lead.id,
+      oldValue: { status: oldStage },
+      newValue: { status: stage, notes },
+      ip: req.ip
+    });
+
+    res.json({
+      message: `Lead stage updated to ${stage}`,
+      lead: {
+        ...lead.toObject(),
+        id: lead._id.toString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const { activity_type, title, description, metadata } = req.body;
-  if (!activity_type || !title) {
-    return res.status(400).json({ error: 'Activity type and title are required.' });
-  }
-
-  logLeadActivity({
-    leadId: lead.id,
-    activityType: activity_type,
-    title,
-    description: description || '',
-    performedBy: req.employee ? req.employee.id : null,
-    metadata
-  });
-
-  // If call or WhatsApp logged on a NEW lead, advance to CONTACTED
-  if ((activity_type === 'CALL_MADE' || activity_type === 'WHATSAPP_SENT' || activity_type === 'EMAIL_SENT') && lead.status === 'NEW') {
-    db.prepare(`UPDATE leads SET status = 'CONTACTED', stage_updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(lead.id);
-  }
-
-  const recent = db.prepare(`
-    SELECT act.*, e.first_name || ' ' || e.last_name as performed_by_name
-    FROM lead_activities act
-    LEFT JOIN employees e ON act.performed_by = e.id
-    WHERE act.lead_id = ?
-    ORDER BY act.id DESC LIMIT 1
-  `).get(lead.id);
-
-  res.status(201).json({ message: 'Activity logged successfully', activity: recent });
 });
 
-// =========================================================================
+// Update Lead Details
+router.put('/:id', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const updateFields = [
+      'company_name', 'contact_person', 'designation', 'phone', 'whatsapp', 'email', 'website',
+      'city', 'state', 'country', 'source', 'industry', 'business_type', 'deal_value', 'budget_range',
+      'requirement', 'urgency', 'priority', 'notes', 'status', 'assigned_sales_employee_id'
+    ];
+
+    for (const f of updateFields) {
+      if (req.body[f] !== undefined) {
+        lead[f] = req.body[f];
+      }
+    }
+
+    await lead.save();
+
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
+      activityType: 'NOTE_ADDED',
+      title: 'Lead Details Updated',
+      description: `Details updated by ${req.user.username}`,
+      performedBy: req.employee ? (req.employee._id || req.employee.id) : null
+    });
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'UPDATED',
+      entity: 'leads',
+      entityId: lead._id || lead.id,
+      newValue: req.body,
+      ip: req.ip
+    });
+
+    const updatedLead = await Lead.findById(lead._id)
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .populate('created_by', 'username')
+      .lean({ virtuals: true });
+
+    updatedLead.id = updatedLead._id.toString();
+    const emp = updatedLead.assigned_sales_employee_id || {};
+    updatedLead.assigned_employee_name = emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null;
+    updatedLead.created_by_name = updatedLead.created_by?.username || null;
+
+    res.json({ message: 'Lead updated successfully', lead: updatedLead });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 6. Lead Qualification API
+router.put('/:id/qualify', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const { qualification_data, qualification_status, lead_score, deal_value } = req.body;
+
+    let newStatus = lead.status;
+    if (qualification_status === 'Qualified' && (lead.status === 'NEW' || lead.status === 'CONTACTED')) {
+      newStatus = 'QUALIFIED';
+    } else if (qualification_status === 'Unqualified') {
+      newStatus = 'LOST';
+    }
+
+    lead.qualification_data = qualification_data;
+    if (qualification_status) lead.qualification_status = qualification_status;
+    if (lead_score !== undefined) lead.lead_score = Number(lead_score);
+    if (deal_value !== undefined) lead.deal_value = Number(deal_value);
+    lead.status = newStatus;
+    lead.stage_updated_at = new Date();
+    await lead.save();
+
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
+      activityType: 'QUALIFICATION_UPDATED',
+      title: `Lead Qualification: ${qualification_status || 'Updated'}`,
+      description: `Lead scored at ${lead_score || lead.lead_score}. Status set to ${qualification_status}.`,
+      performedBy: req.employee ? (req.employee._id || req.employee.id) : null
+    });
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'LEAD_QUALIFIED',
+      entity: 'leads',
+      entityId: lead._id || lead.id,
+      newValue: { qualification_status, lead_score },
+      ip: req.ip
+    });
+
+    res.json({
+      message: 'Lead qualification updated successfully',
+      lead: {
+        ...lead.toObject(),
+        id: lead._id.toString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 7. Lead Activity Timeline & Logging
+router.get('/:id/activities', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id)
+      .populate('activities.performed_by', 'first_name last_name')
+      .lean({ virtuals: true });
+
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const activities = (lead.activities || []).map(act => {
+      const emp = act.performed_by || {};
+      return {
+        ...act,
+        id: act._id.toString(),
+        performed_by_name: emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null
+      };
+    }).reverse();
+
+    res.json({ activities });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/activities', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const { activity_type, title, description, metadata } = req.body;
+    if (!activity_type || !title) {
+      return res.status(400).json({ error: 'Activity type and title are required.' });
+    }
+
+    const activityDoc = {
+      activity_type,
+      title,
+      description: description || '',
+      performed_by: req.employee ? (req.employee._id || req.employee.id) : null,
+      metadata
+    };
+
+    lead.activities.push(activityDoc);
+
+    if ((activity_type === 'CALL_MADE' || activity_type === 'WHATSAPP_SENT' || activity_type === 'EMAIL_SENT') && lead.status === 'NEW') {
+      lead.status = 'CONTACTED';
+      lead.stage_updated_at = new Date();
+    }
+
+    await lead.save();
+
+    const createdAct = lead.activities[lead.activities.length - 1];
+
+    res.status(201).json({
+      message: 'Activity logged successfully',
+      activity: {
+        ...createdAct.toObject(),
+        id: createdAct._id.toString(),
+        performed_by_name: req.employee ? `${req.employee.first_name} ${req.employee.last_name || ''}`.trim() : null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 8. Add Follow-up to Lead
-// =========================================================================
-router.post('/:id/follow-ups', authenticate, (req, res) => {
-  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
-  if (!lead) {
-    return res.status(404).json({ error: 'Lead not found' });
+router.post('/:id/follow-ups', authenticate, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const {
+      follow_up_date, follow_up_time, contact_method, discussion_summary,
+      client_requirement, next_action, next_follow_up_date, priority, reminder, status
+    } = req.body;
+
+    if (!follow_up_date || !contact_method || !discussion_summary) {
+      return res.status(400).json({ error: 'Date, contact method, and discussion summary are required.' });
+    }
+
+    const assignedEmp = req.employee ? (req.employee._id || req.employee.id) : lead.assigned_sales_employee_id;
+
+    const followUpDoc = {
+      follow_up_date,
+      follow_up_time: follow_up_time || '14:00',
+      contact_method,
+      follow_up_type: contact_method || 'Call',
+      discussion_summary,
+      notes: discussion_summary,
+      client_requirement: client_requirement || '',
+      next_action: next_action || '',
+      next_follow_up_date: next_follow_up_date || null,
+      assigned_employee_id: assignedEmp,
+      performed_by: req.employee ? (req.employee._id || req.employee.id) : null,
+      priority: priority || 'MEDIUM',
+      reminder: reminder !== undefined ? !!reminder : true,
+      status: status || 'PENDING'
+    };
+
+    lead.follow_ups.push(followUpDoc);
+
+    if (lead.status === 'NEW') {
+      lead.status = 'CONTACTED';
+      lead.stage_updated_at = new Date();
+    }
+
+    await lead.save();
+
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
+      activityType: 'FOLLOW_UP_SCHEDULED',
+      title: `${contact_method} Follow-up Scheduled`,
+      description: `Scheduled for ${follow_up_date} at ${follow_up_time || '14:00'}. Action: ${next_action || 'Discussion'}`,
+      performedBy: assignedEmp
+    });
+
+    const newFollowUp = lead.follow_ups[lead.follow_ups.length - 1];
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'CREATED',
+      entity: 'lead_follow_ups',
+      entityId: newFollowUp._id,
+      newValue: { lead_id: lead._id, contact_method, follow_up_date },
+      ip: req.ip
+    });
+
+    res.status(201).json({
+      message: 'Follow-up recorded successfully',
+      follow_up: {
+        ...newFollowUp.toObject(),
+        id: newFollowUp._id.toString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const {
-    follow_up_date, follow_up_time, contact_method, discussion_summary,
-    client_requirement, next_action, next_follow_up_date, priority, reminder, status
-  } = req.body;
-
-  if (!follow_up_date || !contact_method || !discussion_summary) {
-    return res.status(400).json({ error: 'Date, contact method, and discussion summary are required.' });
-  }
-
-  const assignedEmp = req.employee ? req.employee.id : lead.assigned_sales_employee_id;
-
-  const result = db.prepare(`
-    INSERT INTO lead_follow_ups (
-      lead_id, follow_up_date, follow_up_time, contact_method, discussion_summary,
-      client_requirement, next_action, next_follow_up_date, assigned_employee_id,
-      priority, reminder, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    lead.id, follow_up_date, follow_up_time || '14:00', contact_method, discussion_summary,
-    client_requirement || '', next_action || '', next_follow_up_date || null, assignedEmp,
-    priority || 'MEDIUM', reminder !== undefined ? (reminder ? 1 : 0) : 1, status || 'PENDING'
-  );
-
-  // If NEW, advance to CONTACTED
-  if (lead.status === 'NEW') {
-    db.prepare("UPDATE leads SET status = 'CONTACTED', stage_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(lead.id);
-  }
-
-  logLeadActivity({
-    leadId: lead.id,
-    activityType: 'FOLLOW_UP_SCHEDULED',
-    title: `${contact_method} Follow-up Scheduled`,
-    description: `Scheduled for ${follow_up_date} at ${follow_up_time || '14:00'}. Action: ${next_action || 'Discussion'}`,
-    performedBy: assignedEmp
-  });
-
-  logAudit({
-    userId: req.user.id,
-    action: 'CREATED',
-    entity: 'lead_follow_ups',
-    entityId: result.lastInsertRowid,
-    newValue: { lead_id: lead.id, contact_method, follow_up_date },
-    ip: req.ip
-  });
-
-  const created = db.prepare('SELECT * FROM lead_follow_ups WHERE id = ?').get(result.lastInsertRowid);
-  res.status(201).json({ message: 'Follow-up recorded successfully', follow_up: created });
 });
 
-// =========================================================================
-// 9. Won Deal & Client Handover Workflow (Section 16, 17)
-// =========================================================================
-router.post('/:id/convert-and-handover', authenticate, requireRole(['admin', 'sales']), (req, res) => {
-  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
-  if (!lead) {
-    return res.status(404).json({ error: 'Lead not found' });
-  }
+// 9. Won Deal & Client Handover Workflow
+router.post('/:id/convert-and-handover', authenticate, requireRole(['admin', 'sales']), async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
 
-  if (lead.converted_client_id) {
-    return res.status(400).json({ error: 'This lead has already been converted to client.' });
-  }
+    if (lead.converted_client_id) {
+      return res.status(400).json({ error: 'This lead has already been converted to client.' });
+    }
 
-  const {
-    start_date, contract_start_date, contract_end_date, billing_cycle = 'Monthly',
-    monthly_value, client_priority = 'HIGH',
-    account_manager_id, marketing_manager_id, creative_editor_id,
-    client_requirements, services_sold, pricing_terms, commitments, campaign_requirements,
-    target_audience, important_dates, special_instructions, communication_preferences
-  } = req.body;
+    const {
+      start_date, billing_cycle = 'Monthly',
+      monthly_value,
+      account_manager_id, marketing_manager_id, creative_editor_id,
+      client_requirements, services_sold, pricing_terms, commitments, campaign_requirements,
+      target_audience, important_dates, special_instructions, communication_preferences
+    } = req.body;
 
-  const convertTx = db.transaction(() => {
-    const clientCount = db.prepare('SELECT COUNT(*) as count FROM clients').get().count + 1;
+    const clientCount = await Client.countDocuments() + 1;
     const client_code = `CL-${new Date().getFullYear()}-${String(clientCount).padStart(4, '0')}`;
-    const sDate = start_date || new Date().toISOString().split('T')[0];
+    const sDate = start_date || getTodayDate();
 
-    // 1. Create Client
-    const clientRes = db.prepare(`
-      INSERT INTO clients (
-        client_code, company_name, business_type, industry, website, address,
-        city, state, primary_contact_name, primary_contact_designation,
-        primary_contact_phone, primary_contact_whatsapp, primary_contact_email,
-        assigned_sales_employee_id, billing_cycle, status, start_date, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ONBOARDING', ?, ?)
-    `).run(
-      client_code, lead.company_name, lead.business_type, lead.industry, lead.website,
-      lead.city || '', lead.city || '', lead.state || '', lead.contact_person, lead.designation,
-      lead.phone, lead.whatsapp || lead.phone, lead.email || `${lead.contact_person.toLowerCase().replace(/\s+/g, '')}@client.com`,
-      lead.assigned_sales_employee_id, billing_cycle, sDate,
-      `Converted from Won Deal [${lead.lead_code}]. Monthly Retainer: ₹${Number(monthly_value || lead.deal_value || 0).toLocaleString()}`
-    );
+    // 17-Point Onboarding Checklist
+    const checklistItems = [
+      { item_key: 'profile_complete', item_label: 'Client profile complete', is_completed: false },
+      { item_key: 'logo_received', item_label: 'Logo received', is_completed: false },
+      { item_key: 'brand_guidelines', item_label: 'Brand guidelines received', is_completed: false },
+      { item_key: 'brand_colors', item_label: 'Brand colors received', is_completed: false },
+      { item_key: 'fonts_received', item_label: 'Fonts received', is_completed: false },
+      { item_key: 'social_media_links', item_label: 'Social media links received', is_completed: false },
+      { item_key: 'social_credentials', item_label: 'Social media credentials configured securely', is_completed: false },
+      { item_key: 'website_details', item_label: 'Website details received', is_completed: false },
+      { item_key: 'product_service_info', item_label: 'Product/service information received', is_completed: false },
+      { item_key: 'target_audience', item_label: 'Target audience defined', is_completed: false },
+      { item_key: 'competitors_added', item_label: 'Competitors added', is_completed: false },
+      { item_key: 'location_service_area', item_label: 'Location/service area added', is_completed: false },
+      { item_key: 'comm_preferences', item_label: 'Communication preferences confirmed', is_completed: false },
+      { item_key: 'approval_person_id', item_label: 'Approval person identified', is_completed: false },
+      { item_key: 'content_preferences', item_label: 'Content preferences defined', is_completed: false },
+      { item_key: 'campaign_goals', item_label: 'Campaign goals defined', is_completed: false },
+      { item_key: 'package_confirmed', item_label: 'Required service package confirmed', is_completed: false }
+    ];
 
-    const clientId = clientRes.lastInsertRowid;
+    const primaryContact = {
+      name: lead.contact_person,
+      designation: lead.designation || 'Owner',
+      email: lead.email || `${lead.contact_person.toLowerCase().replace(/\s+/g, '')}@client.com`,
+      phone: lead.phone,
+      is_primary: true
+    };
 
-    // 2. Primary Contact
-    db.prepare(`
-      INSERT INTO client_contacts (
-        client_id, name, designation, phone, email, whatsapp, can_approve_content, can_create_requests
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, 1)
-    `).run(
-      clientId, lead.contact_person, lead.designation || 'Owner', lead.phone,
-      lead.email || `${lead.contact_person.toLowerCase().replace(/\s+/g, '')}@client.com`, lead.whatsapp || lead.phone
-    );
+    const newClient = await Client.create({
+      client_code,
+      company_name: lead.company_name,
+      business_type: lead.business_type,
+      industry: lead.industry,
+      website: lead.website,
+      address: lead.city || '',
+      city: lead.city || '',
+      state: lead.state || '',
+      primary_contact_name: lead.contact_person,
+      primary_contact_designation: lead.designation,
+      primary_contact_phone: lead.phone,
+      primary_contact_whatsapp: lead.whatsapp || lead.phone,
+      primary_contact_email: lead.email || `${lead.contact_person.toLowerCase().replace(/\s+/g, '')}@client.com`,
+      assigned_sales_employee_id: lead.assigned_sales_employee_id,
+      account_manager_id: account_manager_id || null,
+      billing_cycle,
+      status: 'ONBOARDING',
+      start_date: sDate,
+      monthly_retainer_fee: Number(monthly_value || lead.deal_value || 0),
+      notes: `Converted from Won Deal [${lead.lead_code}]. Monthly Retainer: ₹${Number(monthly_value || lead.deal_value || 0).toLocaleString()}`,
+      contacts: [primaryContact],
+      onboarding_checklist: checklistItems
+    });
 
-    // 3. Client Services (if array provided)
+    const clientId = newClient._id;
+
+    // Services Sold
     const servicesArray = Array.isArray(services_sold)
       ? services_sold
-      : (lead.services_required ? JSON.parse(lead.services_required || '[]') : []);
+      : (lead.services_required ? (typeof lead.services_required === 'string' ? JSON.parse(lead.services_required || '[]') : lead.services_required) : []);
 
     for (const s of servicesArray) {
       const sName = typeof s === 'string' ? s : (s.service_name || 'Marketing Retainer');
       const sPrice = typeof s === 'object' && s.price ? s.price : (monthly_value || lead.deal_value || 50000);
-      db.prepare(`
-        INSERT INTO client_services (
-          client_id, service_name, billing_cycle, price, start_date, status
-        ) VALUES (?, ?, ?, ?, ?, 'ACTIVE')
-      `).run(clientId, sName, billing_cycle, sPrice, sDate);
+      await ClientService.create({
+        client_id: clientId,
+        service_name: sName,
+        billing_cycle,
+        price: sPrice,
+        start_date: sDate,
+        status: 'ACTIVE'
+      });
     }
 
-    // 4. Employee Assignments
-    if (marketing_manager_id) {
-      db.prepare(`
-        INSERT INTO employee_assignments (client_id, employee_id, role, responsibilities, is_lead)
-        VALUES (?, ?, 'Marketing Manager', 'Primary strategy & client reviews oversight', 1)
-      `).run(clientId, marketing_manager_id);
-    }
+    // Client Handover Record
+    await ClientHandover.create({
+      lead_id: lead._id,
+      client_id: clientId,
+      sales_employee_id: req.employee ? (req.employee._id || req.employee.id) : lead.assigned_sales_employee_id,
+      marketing_manager_id: marketing_manager_id || null,
+      account_manager_id: account_manager_id || null,
+      client_requirements: client_requirements || lead.requirement || '',
+      services_sold: servicesArray,
+      pricing_terms: pricing_terms || `Monthly Retainer: ₹${Number(monthly_value || lead.deal_value || 0).toLocaleString()} (${billing_cycle})`,
+      commitments: commitments || '',
+      campaign_requirements: campaign_requirements || '',
+      target_audience: target_audience || lead.target_market || '',
+      important_dates: important_dates || `Kickoff: ${sDate}`,
+      special_instructions: special_instructions || '',
+      communication_preferences: communication_preferences || 'WhatsApp & Email',
+      status: 'PENDING'
+    });
 
-    if (account_manager_id) {
-      db.prepare(`
-        INSERT INTO employee_assignments (client_id, employee_id, role, responsibilities, is_lead)
-        VALUES (?, ?, 'Account Manager', 'Client communications and operations manager', 0)
-      `).run(clientId, account_manager_id);
-    }
+    // Update Lead to WON
+    lead.status = 'WON';
+    lead.deal_value = monthly_value ? Number(monthly_value) : lead.deal_value;
+    lead.converted_client_id = clientId;
+    lead.stage_updated_at = new Date();
+    await lead.save();
 
-    if (creative_editor_id) {
-      db.prepare(`
-        INSERT INTO employee_assignments (client_id, employee_id, role, responsibilities, is_lead)
-        VALUES (?, ?, 'Creative Specialist', 'Lead creative design & video editing', 0)
-      `).run(clientId, creative_editor_id);
-    }
-
-    // 5. 17-Point Onboarding Checklist
-    const checklistItems = [
-      { key: 'profile_complete', label: 'Client profile complete' },
-      { key: 'logo_received', label: 'Logo received' },
-      { key: 'brand_guidelines', label: 'Brand guidelines received' },
-      { key: 'brand_colors', label: 'Brand colors received' },
-      { key: 'fonts_received', label: 'Fonts received' },
-      { key: 'social_media_links', label: 'Social media links received' },
-      { key: 'social_credentials', label: 'Social media credentials configured securely' },
-      { key: 'website_details', label: 'Website details received' },
-      { key: 'product_service_info', label: 'Product/service information received' },
-      { key: 'target_audience', label: 'Target audience defined' },
-      { key: 'competitors_added', label: 'Competitors added' },
-      { key: 'location_service_area', label: 'Location/service area added' },
-      { key: 'comm_preferences', label: 'Communication preferences confirmed' },
-      { key: 'approval_person_id', label: 'Approval person identified' },
-      { key: 'content_preferences', label: 'Content preferences defined' },
-      { key: 'campaign_goals', label: 'Campaign goals defined' },
-      { key: 'package_confirmed', label: 'Required service package confirmed' }
-    ];
-
-    const insertChecklist = db.prepare(`
-      INSERT INTO client_onboarding_checklists (client_id, item_key, item_label, is_completed)
-      VALUES (?, ?, ?, 0)
-    `);
-    for (const item of checklistItems) {
-      insertChecklist.run(clientId, item.key, item.label);
-    }
-
-    // 6. Client Handover Record
-    db.prepare(`
-      INSERT INTO client_handovers (
-        lead_id, client_id, sales_employee_id, marketing_manager_id, account_manager_id,
-        client_requirements, services_sold, pricing_terms, commitments, campaign_requirements,
-        target_audience, important_dates, special_instructions, communication_preferences, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-    `).run(
-      lead.id, clientId,
-      req.employee ? req.employee.id : lead.assigned_sales_employee_id,
-      marketing_manager_id || null,
-      account_manager_id || null,
-      client_requirements || lead.requirement || '',
-      JSON.stringify(servicesArray),
-      pricing_terms || `Monthly Retainer: ₹${Number(monthly_value || lead.deal_value || 0).toLocaleString()} (${billing_cycle})`,
-      commitments || '',
-      campaign_requirements || '',
-      target_audience || lead.target_market || '',
-      important_dates || `Kickoff: ${sDate}`,
-      special_instructions || '',
-      communication_preferences || 'WhatsApp & Email',
-    );
-
-    // 7. Update Lead to WON with converted_client_id
-    db.prepare(`
-      UPDATE leads SET
-        status = 'WON',
-        deal_value = coalesce(?, deal_value),
-        converted_client_id = ?,
-        stage_updated_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(monthly_value ? Number(monthly_value) : lead.deal_value, clientId, lead.id);
-
-    // 8. Log Activities
-    logLeadActivity({
-      leadId: lead.id,
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
       activityType: 'DEAL_WON',
       title: 'Deal Won & Converted',
       description: `Opportunity successfully closed at ₹${Number(monthly_value || lead.deal_value || 0).toLocaleString()}. Converted to Client [${client_code}].`,
-      performedBy: req.employee ? req.employee.id : null
+      performedBy: req.employee ? (req.employee._id || req.employee.id) : null
     });
 
-    logLeadActivity({
-      leadId: lead.id,
+    await logLeadActivity({
+      leadId: lead._id || lead.id,
       activityType: 'HANDOVER_SUBMITTED',
       title: 'Client Handover Submitted',
       description: 'Formal agency handover dossier created for onboarding and marketing execution team.',
-      performedBy: req.employee ? req.employee.id : null
+      performedBy: req.employee ? (req.employee._id || req.employee.id) : null
     });
 
-    // 9. Notify Marketing Manager
     if (marketing_manager_id) {
-      const mmUser = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(marketing_manager_id);
-      if (mmUser) {
-        createNotification({
-          userId: mmUser.user_id,
+      const mmEmp = await Employee.findById(marketing_manager_id);
+      if (mmEmp && mmEmp.user_id) {
+        await createNotification({
+          userId: mmEmp.user_id,
           type: 'CLIENT_HANDOVER',
           title: 'New Client Handover Assigned',
           message: `${lead.company_name} has been won and handed over for marketing kickoff.`,
@@ -817,27 +1161,23 @@ router.post('/:id/convert-and-handover', authenticate, requireRole(['admin', 'sa
       }
     }
 
-    return { clientId, client_code };
-  });
-
-  try {
-    const result = convertTx();
-
-    logAudit({
-      userId: req.user.id,
+    await logAudit({
+      userId: req.user._id || req.user.id,
       action: 'DEAL_WON',
       entity: 'leads',
-      entityId: lead.id,
-      newValue: { status: 'WON', clientId: result.clientId, client_code: result.client_code },
+      entityId: lead._id || lead.id,
+      newValue: { status: 'WON', clientId: clientId.toString(), client_code },
       ip: req.ip
     });
 
-    const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(result.clientId);
     res.status(201).json({
       message: 'Deal Won! Client successfully created and Handover submitted to Marketing team.',
-      client,
-      client_id: result.clientId,
-      client_code: result.client_code
+      client: {
+        ...newClient.toObject(),
+        id: clientId.toString()
+      },
+      client_id: clientId.toString(),
+      client_code
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to complete deal conversion: ' + err.message });

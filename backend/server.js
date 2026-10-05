@@ -1,11 +1,13 @@
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Initialize Database connection and schema
-import db from './db/database.js';
+// Initialize MongoDB Database connection
+import { connectDB } from './db/mongodb.js';
+import { initSystemRoles } from './db/init_roles.js';
 
 // Initialize WebSocket hub
 import { initWebSocketServer } from './websocket.js';
@@ -39,6 +41,7 @@ import auditLogsRouter from './routes/auditLogs.js';
 import searchRouter from './routes/search.js';
 import salesRouter from './routes/sales.js';
 import meetingsRouter from './routes/meetings.js';
+import mediaRouter from './routes/media.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,13 +86,14 @@ app.use('/api/audit-logs', auditLogsRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/sales', salesRouter);
 app.use('/api/meetings', meetingsRouter);
+app.use('/api/media', mediaRouter);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), platform: 'Zentra Digital Agency ERP' });
+  res.json({ status: 'ok', time: new Date().toISOString(), platform: 'Zentra Digital Agency ERP', db: 'mongodb' });
 });
 
-// Centralized Error Handling (Section 63 - Never show raw SQL/stack traces to client)
+// Centralized Error Handling
 app.use((err, req, res, next) => {
   console.error('Server Internal Error:', err);
   res.status(err.status || 500).json({
@@ -101,7 +105,21 @@ app.use((err, req, res, next) => {
 initWebSocketServer(server);
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`[Zentra Server] Running on http://localhost:${PORT}`);
-  console.log(`[Zentra WebSocket] Active on ws://localhost:${PORT}/ws`);
-});
+
+async function startServer() {
+  try {
+    await connectDB();
+    await initSystemRoles();
+    console.log('[MongoDB] Connected. Real-time data store active.');
+  } catch (err) {
+    console.warn('[MongoDB Warning] Could not connect to MongoDB:', err.message);
+    console.warn('[MongoDB Warning] Please ensure MongoDB is running or configure MONGODB_URI in backend/.env');
+  }
+
+  server.listen(PORT, () => {
+    console.log(`[Zentra Server] Running on http://localhost:${PORT}`);
+    console.log(`[Zentra WebSocket] Active on ws://localhost:${PORT}/ws`);
+  });
+}
+
+startServer();

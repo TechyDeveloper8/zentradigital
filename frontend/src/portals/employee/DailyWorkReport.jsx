@@ -12,15 +12,15 @@ export default function DailyWorkReport() {
   const [form, setForm] = useState({
     report_date: new Date().toISOString().split('T')[0],
     remarks: '',
-    challenges: 'None',
-    tomorrows_plan: 'Continue production of scheduled creatives.',
+    challenges: '',
+    tomorrows_plan: '',
     entries: [
       {
         client_id: '',
         task_id: '',
         work_category: 'Creative Production',
         work_description: '',
-        hours_worked: 4,
+        hours_worked: 1,
         deliverable_output: '',
         client_visible: 1
       }

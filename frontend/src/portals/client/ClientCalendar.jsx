@@ -49,20 +49,20 @@ export default function ClientCalendar() {
   };
 
   return (
-    <div className="portal-page">
+    <div className="portal-inner-container">
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+      <div className="portal-page-header">
         <div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
             Content Calendar
           </h1>
-          <p style={{ fontSize: '14px', color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>
+          <p style={{ fontSize: '13.5px', color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>
             Live schedule of your brand's marketing creatives, reels, posts, and publishing timeline.
           </p>
         </div>
 
         {/* Filter bar */}
-        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           <select
             value={filterPlatform}
             onChange={(e) => setFilterPlatform(e.target.value)}
@@ -121,7 +121,7 @@ export default function ClientCalendar() {
           </p>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '20px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '16px' }}>
           {contentItems.map((item) => (
             <div
               key={item.id}
@@ -258,10 +258,10 @@ export default function ClientCalendar() {
 
       {/* Item Detail Modal */}
       {selectedItem && (
-        <div className="modal-backdrop" onClick={() => setSelectedItem(null)}>
+        <div className="modal-overlay" onClick={() => setSelectedItem(null)}>
           <div
             className="modal-content"
-            style={{ maxWidth: '680px', width: '90%' }}
+            style={{ maxWidth: '680px' }}
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>

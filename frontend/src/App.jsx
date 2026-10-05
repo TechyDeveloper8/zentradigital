@@ -12,11 +12,13 @@ import PortalLayout from './components/layout/PortalLayout';
 
 // Admin Views
 import AdminDashboard from './portals/admin/Dashboard';
+import AdminControlPanel from './portals/admin/AdminControlPanel';
 import Leads from './portals/admin/Leads';
 import Clients from './portals/admin/Clients';
 import Projects from './portals/admin/Projects';
 import Employees from './portals/admin/Employees';
 import Attendance from './portals/admin/Attendance';
+import EmployeeAttendanceTracker from './components/attendance/EmployeeAttendanceTracker';
 import EmployeeAnalytics from './portals/admin/EmployeeAnalytics';
 import Tasks from './portals/admin/Tasks';
 import ContentCalendar from './portals/admin/ContentCalendar';
@@ -98,6 +100,11 @@ export default function App() {
             <Route path="/admin" element={
               <ProtectedRoute allowedRoles={['admin']}>
                 <PortalLayout><AdminDashboard /></PortalLayout>
+              </ProtectedRoute>
+            } />
+            <Route path="/admin/control-panel" element={
+              <ProtectedRoute allowedRoles={['admin']}>
+                <PortalLayout><AdminControlPanel /></PortalLayout>
               </ProtectedRoute>
             } />
             <Route path="/admin/leads" element={
@@ -201,7 +208,7 @@ export default function App() {
             } />
             <Route path="/employee/attendance" element={
               <ProtectedRoute allowedUserTypes={['employee']}>
-                <PortalLayout><Attendance /></PortalLayout>
+                <PortalLayout><EmployeeAttendanceTracker title="My Attendance Tracker" /></PortalLayout>
               </ProtectedRoute>
             } />
             <Route path="/employee/chat" element={

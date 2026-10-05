@@ -1,10 +1,10 @@
 import express from 'express';
-import db, { logAudit, logLeadActivity, createNotification } from '../db/database.js';
+import { Lead, Client, Employee, User, Proposal, Meeting, ClientHandover, SalesTask } from '../models/index.js';
+import { logAudit, logLeadActivity, createNotification } from '../db/helpers.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Helper: Calculate date ranges for SQLite
 function getDateRangeBounds(dateRange, customStart, customEnd) {
   const now = new Date();
   let currentStart = '';
@@ -37,7 +37,7 @@ function getDateRangeBounds(dateRange, customStart, customEnd) {
     }
     case 'THIS_WEEK': {
       const day = now.getDay();
-      const diff = now.getDate() - day + (day === 0 ? -6 : 1); // Monday
+      const diff = now.getDate() - day + (day === 0 ? -6 : 1);
       const monday = new Date(now);
       monday.setDate(diff);
       currentStart = format(monday);
@@ -92,7 +92,6 @@ function getDateRangeBounds(dateRange, customStart, customEnd) {
   return { currentStart, currentEnd, prevStart, prevEnd };
 }
 
-// Stage Probability Mapping for Expected Weighted Revenue Calculation (Section 20)
 const STAGE_PROBABILITIES = {
   NEW: 0.10,
   CONTACTED: 0.20,
@@ -105,481 +104,529 @@ const STAGE_PROBABILITIES = {
   'ON HOLD': 0.15
 };
 
-// =========================================================================
-// 1. Live Sales Dashboard Master API (Section 6, 18, 19, 20, 25)
-// =========================================================================
-router.get('/dashboard', authenticate, (req, res) => {
-  const { date_range, start_date, end_date, employee_id } = req.query;
-  const bounds = getDateRangeBounds(date_range, start_date, end_date);
+// 1. Live Sales Dashboard Master API
+router.get('/dashboard', authenticate, async (req, res) => {
+  try {
+    const { date_range, start_date, end_date, employee_id } = req.query;
+    const bounds = getDateRangeBounds(date_range, start_date, end_date);
 
-  // Role scoping: sales employee only sees their assigned leads if not admin
-  let userFilterSql = '';
-  const userParams = [];
-  const prevUserParams = [];
-
-  if (req.user.role_name === 'sales' && req.employee) {
-    userFilterSql = ' AND (assigned_sales_employee_id = ? OR created_by = ?)';
-    userParams.push(req.employee.id, req.user.id);
-    prevUserParams.push(req.employee.id, req.user.id);
-  } else if (employee_id && (req.user.role_name === 'admin' || req.user.role_name === 'marketing_manager')) {
-    userFilterSql = ' AND assigned_sales_employee_id = ?';
-    userParams.push(Number(employee_id));
-    prevUserParams.push(Number(employee_id));
-  }
-
-  // --- 1. NEW LEADS ---
-  const newLeadsCurr = db.prepare(`
-    SELECT COUNT(*) as count FROM leads
-    WHERE date(created_at) BETWEEN ? AND ? ${userFilterSql}
-  `).get(bounds.currentStart, bounds.currentEnd, ...userParams).count;
-
-  const newLeadsPrev = db.prepare(`
-    SELECT COUNT(*) as count FROM leads
-    WHERE date(created_at) BETWEEN ? AND ? ${userFilterSql}
-  `).get(bounds.prevStart, bounds.prevEnd, ...prevUserParams).count;
-
-  // --- 2. TODAY'S FOLLOW-UPS (Live count for today) ---
-  const followUpUserFilter = (req.user.role_name === 'sales' && req.employee)
-    ? ' AND (fu.assigned_employee_id = ? OR l.assigned_sales_employee_id = ?)'
-    : (employee_id ? ' AND fu.assigned_employee_id = ?' : '');
-  const fuParams = (req.user.role_name === 'sales' && req.employee)
-    ? [req.employee.id, req.employee.id]
-    : (employee_id ? [Number(employee_id)] : []);
-
-  const todayFollowUps = db.prepare(`
-    SELECT COUNT(*) as count FROM lead_follow_ups fu
-    JOIN leads l ON fu.lead_id = l.id
-    WHERE fu.follow_up_date = DATE('now') AND fu.status = 'PENDING' ${followUpUserFilter}
-  `).get(...fuParams).count;
-
-  const yesterdayFollowUps = db.prepare(`
-    SELECT COUNT(*) as count FROM lead_follow_ups fu
-    JOIN leads l ON fu.lead_id = l.id
-    WHERE fu.follow_up_date = DATE('now', '-1 day') ${followUpUserFilter}
-  `).get(...fuParams).count;
-
-  // --- 3. UPCOMING MEETINGS ---
-  const meetingUserFilter = (req.user.role_name === 'sales' && req.employee)
-    ? ' AND (m.assigned_employee_id = ? OR m.created_by = ?)'
-    : (employee_id ? ' AND m.assigned_employee_id = ?' : '');
-  const meetingParams = (req.user.role_name === 'sales' && req.employee)
-    ? [req.employee.id, req.user.id]
-    : (employee_id ? [Number(employee_id)] : []);
-
-  const upcomingMeetings = db.prepare(`
-    SELECT COUNT(*) as count FROM meetings m
-    WHERE (m.meeting_date >= DATE('now') OR (m.meeting_date = DATE('now') AND m.meeting_time >= time('now', 'localtime')))
-      AND m.status = 'SCHEDULED' ${meetingUserFilter}
-  `).get(...meetingParams).count;
-
-  const pastMeetingsPeriod = db.prepare(`
-    SELECT COUNT(*) as count FROM meetings m
-    WHERE m.meeting_date BETWEEN ? AND ? ${meetingUserFilter}
-  `).get(bounds.currentStart, bounds.currentEnd, ...meetingParams).count;
-
-  const prevMeetingsPeriod = db.prepare(`
-    SELECT COUNT(*) as count FROM meetings m
-    WHERE m.meeting_date BETWEEN ? AND ? ${meetingUserFilter}
-  `).get(bounds.prevStart, bounds.prevEnd, ...meetingParams).count;
-
-  // --- 4. OPEN PROPOSALS ---
-  const proposalUserFilter = (req.user.role_name === 'sales' && req.employee)
-    ? ' AND (p.prepared_by = ? OR l.assigned_sales_employee_id = ?)'
-    : (employee_id ? ' AND p.prepared_by = ?' : '');
-  const propParams = (req.user.role_name === 'sales' && req.employee)
-    ? [req.employee.id, req.employee.id]
-    : (employee_id ? [Number(employee_id)] : []);
-
-  const openProposalsData = db.prepare(`
-    SELECT COUNT(*) as count, coalesce(SUM(p.total), 0) as total_value
-    FROM proposals p
-    LEFT JOIN leads l ON p.lead_id = l.id
-    WHERE p.status IN ('DRAFT', 'SENT', 'VIEWED', 'NEGOTIATION') ${proposalUserFilter}
-  `).get(...propParams);
-
-  const prevOpenProposals = db.prepare(`
-    SELECT COUNT(*) as count
-    FROM proposals p
-    LEFT JOIN leads l ON p.lead_id = l.id
-    WHERE date(p.created_at) BETWEEN ? AND ? ${proposalUserFilter}
-  `).get(bounds.prevStart, bounds.prevEnd, ...propParams).count;
-
-  // --- 5. WON DEALS IN PERIOD ---
-  const wonDealsCurr = db.prepare(`
-    SELECT COUNT(*) as count, coalesce(SUM(deal_value), 0) as total_value
-    FROM leads
-    WHERE status = 'WON' AND date(coalesce(stage_updated_at, updated_at, created_at)) BETWEEN ? AND ? ${userFilterSql}
-  `).get(bounds.currentStart, bounds.currentEnd, ...userParams);
-
-  const wonDealsPrev = db.prepare(`
-    SELECT COUNT(*) as count, coalesce(SUM(deal_value), 0) as total_value
-    FROM leads
-    WHERE status = 'WON' AND date(coalesce(stage_updated_at, updated_at, created_at)) BETWEEN ? AND ? ${userFilterSql}
-  `).get(bounds.prevStart, bounds.prevEnd, ...prevUserParams);
-
-  // --- 6. LOST DEALS IN PERIOD ---
-  const lostDealsCurr = db.prepare(`
-    SELECT COUNT(*) as count, coalesce(SUM(deal_value), 0) as total_value
-    FROM leads
-    WHERE status = 'LOST' AND date(coalesce(stage_updated_at, updated_at, created_at)) BETWEEN ? AND ? ${userFilterSql}
-  `).get(bounds.currentStart, bounds.currentEnd, ...userParams);
-
-  const lostDealsPrev = db.prepare(`
-    SELECT COUNT(*) as count
-    FROM leads
-    WHERE status = 'LOST' AND date(coalesce(stage_updated_at, updated_at, created_at)) BETWEEN ? AND ? ${userFilterSql}
-  `).get(bounds.prevStart, bounds.prevEnd, ...prevUserParams).count;
-
-  // --- 7. ACTIVE PIPELINE VALUE (Open active opportunities) ---
-  const openPipelineData = db.prepare(`
-    SELECT COUNT(*) as count, coalesce(SUM(deal_value), 0) as total_value
-    FROM leads
-    WHERE status IN ('NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION') ${userFilterSql}
-  `).get(...userParams);
-
-  // Expected Weighted Revenue: sum of (deal_value * stage_probability)
-  const openLeadsForWeight = db.prepare(`
-    SELECT status, deal_value FROM leads
-    WHERE status IN ('NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION') ${userFilterSql}
-  `).all(...userParams);
-
-  const expectedWeightedRevenue = openLeadsForWeight.reduce((acc, lead) => {
-    const prob = STAGE_PROBABILITIES[lead.status] || 0.1;
-    return acc + (Number(lead.deal_value || 0) * prob);
-  }, 0);
-
-  // --- 8. CONVERSION RATE ---
-  const totalDecidedCurr = wonDealsCurr.count + lostDealsCurr.count;
-  const convRateCurr = totalDecidedCurr > 0
-    ? Math.round((wonDealsCurr.count / totalDecidedCurr) * 100)
-    : (newLeadsCurr > 0 ? Math.round((wonDealsCurr.count / newLeadsCurr) * 100) : 0);
-
-  const totalDecidedPrev = wonDealsPrev.count + lostDealsPrev;
-  const convRatePrev = totalDecidedPrev > 0
-    ? Math.round((wonDealsPrev.count / totalDecidedPrev) * 100)
-    : (newLeadsPrev > 0 ? Math.round((wonDealsPrev.count / newLeadsPrev) * 100) : 0);
-
-  const calcChange = (curr, prev) => {
-    if (prev === 0) return curr > 0 ? 100 : 0;
-    return Math.round(((curr - prev) / prev) * 100);
-  };
-
-  const kpis = {
-    new_leads: {
-      value: newLeadsCurr,
-      prev_value: newLeadsPrev,
-      change_percent: calcChange(newLeadsCurr, newLeadsPrev),
-      period_label: date_range || 'This Month'
-    },
-    today_followups: {
-      value: todayFollowUps,
-      prev_value: yesterdayFollowUps,
-      change_percent: calcChange(todayFollowUps, yesterdayFollowUps),
-      period_label: "vs Yesterday"
-    },
-    upcoming_meetings: {
-      value: upcomingMeetings,
-      prev_value: prevMeetingsPeriod,
-      change_percent: calcChange(pastMeetingsPeriod, prevMeetingsPeriod),
-      period_label: "vs previous period"
-    },
-    open_proposals: {
-      value: openProposalsData.count,
-      total_amount: openProposalsData.total_value,
-      prev_value: prevOpenProposals,
-      change_percent: calcChange(openProposalsData.count, prevOpenProposals),
-      period_label: "Active pipeline proposals"
-    },
-    won_deals: {
-      value: wonDealsCurr.count,
-      total_revenue: wonDealsCurr.total_value,
-      prev_value: wonDealsPrev.count,
-      prev_revenue: wonDealsPrev.total_value,
-      change_percent: calcChange(wonDealsCurr.count, wonDealsPrev.count),
-      period_label: "vs previous period"
-    },
-    lost_deals: {
-      value: lostDealsCurr.count,
-      total_loss: lostDealsCurr.total_value,
-      prev_value: lostDealsPrev,
-      change_percent: calcChange(lostDealsCurr.count, lostDealsPrev),
-      period_label: "vs previous period"
-    },
-    pipeline_value: {
-      value: openPipelineData.total_value,
-      deal_count: openPipelineData.count,
-      weighted_revenue: Math.round(expectedWeightedRevenue),
-      change_percent: calcChange(openPipelineData.total_value, wonDealsPrev.total_value),
-      period_label: "Active open pipeline"
-    },
-    conversion_rate: {
-      value: `${convRateCurr}%`,
-      raw_value: convRateCurr,
-      prev_value: `${convRatePrev}%`,
-      change_percent: convRateCurr - convRatePrev,
-      period_label: "Closed deals conversion"
+    const baseFilter = {};
+    if (req.user.role_name === 'sales' && req.employee) {
+      baseFilter.$or = [
+        { assigned_sales_employee_id: req.employee._id || req.employee.id },
+        { created_by: req.user._id || req.user.id }
+      ];
+    } else if (employee_id && (req.user.role_name === 'admin' || req.user.role_name === 'marketing_manager')) {
+      baseFilter.assigned_sales_employee_id = employee_id;
     }
-  };
 
-  // --- 9. SALES CONVERSION FUNNEL ---
-  const funnelStages = ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON'];
-  const allStageCounts = db.prepare(`
-    SELECT status, COUNT(*) as count, coalesce(SUM(deal_value), 0) as total_value
-    FROM leads
-    WHERE 1=1 ${userFilterSql}
-    GROUP BY status
-  `).all(...userParams);
+    const curStart = new Date(bounds.currentStart);
+    const curEnd = new Date(bounds.currentEnd + 'T23:59:59.999Z');
+    const pStart = new Date(bounds.prevStart);
+    const pEnd = new Date(bounds.prevEnd + 'T23:59:59.999Z');
 
-  const stageCountMap = {};
-  allStageCounts.forEach(s => { stageCountMap[s.status] = s; });
-
-  const funnelData = [];
-  let prevCount = null;
-  const firstStageCount = (stageCountMap['NEW']?.count || 0) + (stageCountMap['CONTACTED']?.count || 0) + (stageCountMap['QUALIFIED']?.count || 0) + (stageCountMap['MEETING']?.count || 0) + (stageCountMap['PROPOSAL']?.count || 0) + (stageCountMap['NEGOTIATION']?.count || 0) + (stageCountMap['WON']?.count || 0);
-
-  for (const stage of funnelStages) {
-    const currStageCount = stageCountMap[stage]?.count || 0;
-    const stageVal = stageCountMap[stage]?.total_value || 0;
-    const stepConv = prevCount !== null && prevCount > 0
-      ? Math.round((currStageCount / prevCount) * 100)
-      : 100;
-    const overallConv = firstStageCount > 0 ? Math.round((currStageCount / firstStageCount) * 100) : 0;
-    const dropOff = prevCount !== null ? Math.max(0, prevCount - currStageCount) : 0;
-
-    funnelData.push({
-      stage,
-      count: currStageCount,
-      total_value: stageVal,
-      conversion_rate: stepConv,
-      overall_conversion: overallConv,
-      drop_off: dropOff
+    // 1. NEW LEADS
+    const newLeadsCurr = await Lead.countDocuments({
+      ...baseFilter,
+      createdAt: { $gte: curStart, $lte: curEnd }
     });
-    prevCount = currStageCount;
-  }
 
-  // --- 10. LEAD SOURCE ANALYTICS ---
-  const sourceStats = db.prepare(`
-    SELECT
-      source,
-      COUNT(*) as lead_count,
-      SUM(CASE WHEN status NOT IN ('NEW', 'CONTACTED') THEN 1 ELSE 0 END) as qualified_count,
-      SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) as won_count,
-      coalesce(SUM(CASE WHEN status = 'WON' THEN deal_value ELSE 0 END), 0) as won_revenue,
-      coalesce(SUM(deal_value), 0) as total_value
-    FROM leads
-    WHERE 1=1 ${userFilterSql}
-    GROUP BY source
-    ORDER BY lead_count DESC
-  `).all(...userParams).map(s => ({
-    ...s,
-    conversion_rate: s.lead_count > 0 ? Math.round((s.won_count / s.lead_count) * 100) : 0
-  }));
+    const newLeadsPrev = await Lead.countDocuments({
+      ...baseFilter,
+      createdAt: { $gte: pStart, $lte: pEnd }
+    });
 
-  // --- 11. REVENUE / PIPELINE ANALYTICS ---
-  const revenueAnalytics = {
-    open_pipeline: openPipelineData.total_value,
-    won_revenue: wonDealsCurr.total_value,
-    expected_weighted_revenue: Math.round(expectedWeightedRevenue),
-    avg_deal_size: openPipelineData.count > 0 ? Math.round(openPipelineData.total_value / openPipelineData.count) : 0,
-    active_deal_count: openPipelineData.count,
-    won_deal_count: wonDealsCurr.count
-  };
+    // 2. TODAY'S FOLLOW-UPS
+    const todayStr = new Date().toISOString().split('T')[0];
+    const yestDate = new Date();
+    yestDate.setDate(yestDate.getDate() - 1);
+    const yestStr = yestDate.toISOString().split('T')[0];
 
-  // --- 12. EMPLOYEE SALES PERFORMANCE SUMMARY ---
-  const empPerformance = db.prepare(`
-    SELECT
-      e.id as employee_id,
-      e.first_name || ' ' || e.last_name as name,
-      e.designation,
-      COUNT(l.id) as total_leads,
-      SUM(CASE WHEN l.status != 'NEW' THEN 1 ELSE 0 END) as contacted_leads,
-      SUM(CASE WHEN l.status IN ('QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON') THEN 1 ELSE 0 END) as qualified_leads,
-      SUM(CASE WHEN l.status = 'WON' THEN 1 ELSE 0 END) as won_deals,
-      SUM(CASE WHEN l.status = 'LOST' THEN 1 ELSE 0 END) as lost_deals,
-      coalesce(SUM(CASE WHEN l.status = 'WON' THEN l.deal_value ELSE 0 END), 0) as revenue_generated,
-      coalesce(AVG(l.deal_value), 0) as avg_deal_value
-    FROM employees e
-    JOIN users u ON e.user_id = u.id
-    JOIN roles r ON u.role_id = r.id
-    LEFT JOIN leads l ON l.assigned_sales_employee_id = e.id
-    WHERE r.name = 'sales' OR e.id = ?
-    GROUP BY e.id
-  `).all(req.employee ? req.employee.id : 201).map(p => ({
-    ...p,
-    conversion_rate: (p.won_deals + p.lost_deals) > 0
-      ? Math.round((p.won_deals / (p.won_deals + p.lost_deals)) * 100)
-      : (p.total_leads > 0 ? Math.round((p.won_deals / p.total_leads) * 100) : 0)
-  }));
+    const todayLeads = await Lead.find({
+      ...baseFilter,
+      'follow_ups.follow_up_date': todayStr,
+      'follow_ups.status': 'PENDING'
+    }).lean();
 
-  res.json({
-    bounds,
-    kpis,
-    funnel: funnelData,
-    sources: sourceStats,
-    revenue: revenueAnalytics,
-    performance: empPerformance
-  });
-});
+    let todayFollowUps = 0;
+    for (const l of todayLeads) {
+      for (const fu of (l.follow_ups || [])) {
+        if (fu.follow_up_date === todayStr && fu.status === 'PENDING') {
+          todayFollowUps++;
+        }
+      }
+    }
 
-// =========================================================================
-// 2. Kanban Sales Pipeline API (Section 7)
-// =========================================================================
-router.get('/pipeline', authenticate, (req, res) => {
-  const { search, priority, source, employee_id } = req.query;
+    const yestLeads = await Lead.find({
+      ...baseFilter,
+      'follow_ups.follow_up_date': yestStr
+    }).lean();
 
-  let filterSql = '';
-  const params = [];
+    let yesterdayFollowUps = 0;
+    for (const l of yestLeads) {
+      for (const fu of (l.follow_ups || [])) {
+        if (fu.follow_up_date === yestStr) {
+          yesterdayFollowUps++;
+        }
+      }
+    }
 
-  if (req.user.role_name === 'sales' && req.employee) {
-    filterSql += ' AND (l.assigned_sales_employee_id = ? OR l.created_by = ?)';
-    params.push(req.employee.id, req.user.id);
-  } else if (employee_id && req.user.role_name === 'admin') {
-    filterSql += ' AND l.assigned_sales_employee_id = ?';
-    params.push(Number(employee_id));
-  }
+    // 3. UPCOMING MEETINGS
+    const meetingFilter = { status: 'SCHEDULED', meeting_date: { $gte: todayStr } };
+    if (req.user.role_name === 'sales' && req.employee) {
+      meetingFilter.$or = [
+        { assigned_employee_id: req.employee._id || req.employee.id },
+        { created_by: req.user._id || req.user.id }
+      ];
+    } else if (employee_id) {
+      meetingFilter.assigned_employee_id = employee_id;
+    }
+    const upcomingMeetings = await Meeting.countDocuments(meetingFilter);
 
-  if (priority) {
-    filterSql += ' AND l.priority = ?';
-    params.push(priority);
-  }
+    const pastMeetingsFilter = { meeting_date: { $gte: bounds.currentStart, $lte: bounds.currentEnd } };
+    const prevMeetingsFilter = { meeting_date: { $gte: bounds.prevStart, $lte: bounds.prevEnd } };
+    if (meetingFilter.$or) {
+      pastMeetingsFilter.$or = meetingFilter.$or;
+      prevMeetingsFilter.$or = meetingFilter.$or;
+    } else if (meetingFilter.assigned_employee_id) {
+      pastMeetingsFilter.assigned_employee_id = meetingFilter.assigned_employee_id;
+      prevMeetingsFilter.assigned_employee_id = meetingFilter.assigned_employee_id;
+    }
+    const pastMeetingsPeriod = await Meeting.countDocuments(pastMeetingsFilter);
+    const prevMeetingsPeriod = await Meeting.countDocuments(prevMeetingsFilter);
 
-  if (source) {
-    filterSql += ' AND l.source = ?';
-    params.push(source);
-  }
+    // 4. OPEN PROPOSALS
+    const proposalFilter = { status: { $in: ['DRAFT', 'SENT', 'VIEWED', 'NEGOTIATION'] } };
+    if (req.user.role_name === 'sales' && req.employee) {
+      proposalFilter.$or = [
+        { prepared_by: req.employee._id || req.employee.id },
+        { created_by: req.user._id || req.user.id }
+      ];
+    } else if (employee_id) {
+      proposalFilter.prepared_by = employee_id;
+    }
+    const openProposals = await Proposal.find(proposalFilter).lean();
+    const openProposalsCount = openProposals.length;
+    const openProposalsValue = openProposals.reduce((sum, p) => sum + (Number(p.total) || 0), 0);
 
-  if (search) {
-    filterSql += ' AND (l.company_name LIKE ? OR l.contact_person LIKE ? OR l.phone LIKE ? OR l.lead_code LIKE ?)';
-    const s = `%${search}%`;
-    params.push(s, s, s, s);
-  }
+    const prevOpenProposals = await Proposal.countDocuments({
+      ...proposalFilter,
+      createdAt: { $gte: pStart, $lte: pEnd }
+    });
 
-  const query = `
-    SELECT
-      l.*,
-      e.first_name || ' ' || e.last_name as assigned_employee_name,
-      (SELECT fu.follow_up_date || ' ' || coalesce(fu.follow_up_time, '')
-       FROM lead_follow_ups fu
-       WHERE fu.lead_id = l.id AND fu.status = 'PENDING'
-       ORDER BY fu.follow_up_date ASC LIMIT 1) as next_follow_up,
-      (SELECT act.title
-       FROM lead_activities act
-       WHERE act.lead_id = l.id
-       ORDER BY act.id DESC LIMIT 1) as last_activity,
-      (SELECT act.created_at
-       FROM lead_activities act
-       WHERE act.lead_id = l.id
-       ORDER BY act.id DESC LIMIT 1) as last_activity_time
-    FROM leads l
-    LEFT JOIN employees e ON l.assigned_sales_employee_id = e.id
-    WHERE 1=1 ${filterSql}
-    ORDER BY l.priority = 'URGENT' DESC, l.priority = 'HIGH' DESC, l.deal_value DESC, l.id DESC
-  `;
+    // 5. WON DEALS IN PERIOD
+    const wonLeadsCurr = await Lead.find({
+      ...baseFilter,
+      status: 'WON',
+      $or: [
+        { stage_updated_at: { $gte: curStart, $lte: curEnd } },
+        { updatedAt: { $gte: curStart, $lte: curEnd } },
+        { createdAt: { $gte: curStart, $lte: curEnd } }
+      ]
+    }).lean();
 
-  const allLeads = db.prepare(query).all(...params);
+    const wonLeadsPrev = await Lead.find({
+      ...baseFilter,
+      status: 'WON',
+      $or: [
+        { stage_updated_at: { $gte: pStart, $lte: pEnd } },
+        { updatedAt: { $gte: pStart, $lte: pEnd } },
+        { createdAt: { $gte: pStart, $lte: pEnd } }
+      ]
+    }).lean();
 
-  // Group by the 8 required stages
-  const STAGES = ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST'];
-  const columns = {};
+    const wonDealsCurrCount = wonLeadsCurr.length;
+    const wonDealsCurrValue = wonLeadsCurr.reduce((sum, l) => sum + (Number(l.deal_value) || 0), 0);
+    const wonDealsPrevCount = wonLeadsPrev.length;
+    const wonDealsPrevValue = wonLeadsPrev.reduce((sum, l) => sum + (Number(l.deal_value) || 0), 0);
 
-  STAGES.forEach(stage => {
-    columns[stage] = {
-      stage,
-      count: 0,
-      total_value: 0,
-      leads: []
+    // 6. LOST DEALS IN PERIOD
+    const lostLeadsCurr = await Lead.find({
+      ...baseFilter,
+      status: 'LOST',
+      $or: [
+        { stage_updated_at: { $gte: curStart, $lte: curEnd } },
+        { updatedAt: { $gte: curStart, $lte: curEnd } },
+        { createdAt: { $gte: curStart, $lte: curEnd } }
+      ]
+    }).lean();
+
+    const lostLeadsPrevCount = await Lead.countDocuments({
+      ...baseFilter,
+      status: 'LOST',
+      $or: [
+        { stage_updated_at: { $gte: pStart, $lte: pEnd } },
+        { updatedAt: { $gte: pStart, $lte: pEnd } },
+        { createdAt: { $gte: pStart, $lte: pEnd } }
+      ]
+    });
+
+    const lostDealsCurrCount = lostLeadsCurr.length;
+    const lostDealsCurrValue = lostLeadsCurr.reduce((sum, l) => sum + (Number(l.deal_value) || 0), 0);
+
+    // 7. ACTIVE PIPELINE VALUE
+    const activePipelineLeads = await Lead.find({
+      ...baseFilter,
+      status: { $in: ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION'] }
+    }).lean();
+
+    const openPipelineValue = activePipelineLeads.reduce((sum, l) => sum + (Number(l.deal_value) || 0), 0);
+    const expectedWeightedRevenue = activePipelineLeads.reduce((sum, l) => {
+      const prob = STAGE_PROBABILITIES[l.status] || 0.1;
+      return sum + ((Number(l.deal_value) || 0) * prob);
+    }, 0);
+
+    // 8. CONVERSION RATE
+    const totalDecidedCurr = wonDealsCurrCount + lostDealsCurrCount;
+    const convRateCurr = totalDecidedCurr > 0
+      ? Math.round((wonDealsCurrCount / totalDecidedCurr) * 100)
+      : (newLeadsCurr > 0 ? Math.round((wonDealsCurrCount / newLeadsCurr) * 100) : 0);
+
+    const totalDecidedPrev = wonDealsPrevCount + lostLeadsPrevCount;
+    const convRatePrev = totalDecidedPrev > 0
+      ? Math.round((wonDealsPrevCount / totalDecidedPrev) * 100)
+      : (newLeadsPrev > 0 ? Math.round((wonDealsPrevCount / newLeadsPrev) * 100) : 0);
+
+    const calcChange = (curr, prev) => {
+      if (prev === 0) return curr > 0 ? 100 : 0;
+      return Math.round(((curr - prev) / prev) * 100);
     };
-  });
 
-  allLeads.forEach(lead => {
-    const st = columns[lead.status] ? lead.status : 'NEW';
-    columns[st].leads.push(lead);
-    columns[st].count += 1;
-    columns[st].total_value += Number(lead.deal_value || 0);
-  });
+    const kpis = {
+      new_leads: {
+        value: newLeadsCurr,
+        prev_value: newLeadsPrev,
+        change_percent: calcChange(newLeadsCurr, newLeadsPrev),
+        period_label: date_range || 'This Month'
+      },
+      today_followups: {
+        value: todayFollowUps,
+        prev_value: yesterdayFollowUps,
+        change_percent: calcChange(todayFollowUps, yesterdayFollowUps),
+        period_label: "vs Yesterday"
+      },
+      upcoming_meetings: {
+        value: upcomingMeetings,
+        prev_value: prevMeetingsPeriod,
+        change_percent: calcChange(pastMeetingsPeriod, prevMeetingsPeriod),
+        period_label: "vs previous period"
+      },
+      open_proposals: {
+        value: openProposalsCount,
+        total_amount: openProposalsValue,
+        prev_value: prevOpenProposals,
+        change_percent: calcChange(openProposalsCount, prevOpenProposals),
+        period_label: "Active pipeline proposals"
+      },
+      won_deals: {
+        value: wonDealsCurrCount,
+        total_revenue: wonDealsCurrValue,
+        prev_value: wonDealsPrevCount,
+        prev_revenue: wonDealsPrevValue,
+        change_percent: calcChange(wonDealsCurrCount, wonDealsPrevCount),
+        period_label: "vs previous period"
+      },
+      lost_deals: {
+        value: lostDealsCurrCount,
+        total_loss: lostDealsCurrValue,
+        prev_value: lostLeadsPrevCount,
+        change_percent: calcChange(lostDealsCurrCount, lostLeadsPrevCount),
+        period_label: "vs previous period"
+      },
+      pipeline_value: {
+        value: openPipelineValue,
+        deal_count: activePipelineLeads.length,
+        weighted_revenue: Math.round(expectedWeightedRevenue),
+        change_percent: calcChange(openPipelineValue, wonDealsPrevValue),
+        period_label: "Active open pipeline"
+      },
+      conversion_rate: {
+        value: `${convRateCurr}%`,
+        raw_value: convRateCurr,
+        prev_value: `${convRatePrev}%`,
+        change_percent: convRateCurr - convRatePrev,
+        period_label: "Closed deals conversion"
+      }
+    };
 
-  res.json({
-    stages: STAGES,
-    columns,
-    total_pipeline_value: Object.values(columns).reduce((acc, col) => col.stage !== 'WON' && col.stage !== 'LOST' ? acc + col.total_value : acc, 0),
-    total_opportunities: allLeads.length
-  });
+    // 9. SALES CONVERSION FUNNEL
+    const funnelStages = ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON'];
+    const stageCountsRaw = await Lead.aggregate([
+      { $match: baseFilter },
+      { $group: { _id: '$status', count: { $sum: 1 }, total_value: { $sum: '$deal_value' } } }
+    ]);
+
+    const stageCountMap = {};
+    stageCountsRaw.forEach(s => {
+      stageCountMap[s._id] = { count: s.count, total_value: s.total_value };
+    });
+
+    const funnelData = [];
+    let prevCount = null;
+    const firstStageCount = funnelStages.reduce((sum, st) => sum + (stageCountMap[st]?.count || 0), 0);
+
+    for (const stage of funnelStages) {
+      const currStageCount = stageCountMap[stage]?.count || 0;
+      const stageVal = stageCountMap[stage]?.total_value || 0;
+      const stepConv = prevCount !== null && prevCount > 0
+        ? Math.round((currStageCount / prevCount) * 100)
+        : 100;
+      const overallConv = firstStageCount > 0 ? Math.round((currStageCount / firstStageCount) * 100) : 0;
+      const dropOff = prevCount !== null ? Math.max(0, prevCount - currStageCount) : 0;
+
+      funnelData.push({
+        stage,
+        count: currStageCount,
+        total_value: stageVal,
+        conversion_rate: stepConv,
+        overall_conversion: overallConv,
+        drop_off: dropOff
+      });
+      prevCount = currStageCount;
+    }
+
+    // 10. LEAD SOURCE ANALYTICS
+    const sourceStatsRaw = await Lead.aggregate([
+      { $match: baseFilter },
+      {
+        $group: {
+          _id: '$source',
+          lead_count: { $sum: 1 },
+          qualified_count: {
+            $sum: { $cond: [{ $not: [{ $in: ['$status', ['NEW', 'CONTACTED']] }] }, 1, 0] }
+          },
+          won_count: {
+            $sum: { $cond: [{ $eq: ['$status', 'WON'] }, 1, 0] }
+          },
+          won_revenue: {
+            $sum: { $cond: [{ $eq: ['$status', 'WON'] }, '$deal_value', 0] }
+          },
+          total_value: { $sum: '$deal_value' }
+        }
+      },
+      { $sort: { lead_count: -1 } }
+    ]);
+
+    const sourceStats = sourceStatsRaw.map(s => ({
+      source: s._id || 'Unknown',
+      lead_count: s.lead_count,
+      qualified_count: s.qualified_count,
+      won_count: s.won_count,
+      won_revenue: s.won_revenue,
+      total_value: s.total_value,
+      conversion_rate: s.lead_count > 0 ? Math.round((s.won_count / s.lead_count) * 100) : 0
+    }));
+
+    // 11. REVENUE / PIPELINE ANALYTICS
+    const revenueAnalytics = {
+      open_pipeline: openPipelineValue,
+      won_revenue: wonDealsCurrValue,
+      expected_weighted_revenue: Math.round(expectedWeightedRevenue),
+      avg_deal_size: activePipelineLeads.length > 0 ? Math.round(openPipelineValue / activePipelineLeads.length) : 0,
+      active_deal_count: activePipelineLeads.length,
+      won_deal_count: wonDealsCurrCount
+    };
+
+    // 12. EMPLOYEE SALES PERFORMANCE SUMMARY
+    const salesEmployees = await Employee.find({ employment_status: { $in: ['Active', 'Probation'] } })
+      .populate({ path: 'user_id', populate: { path: 'role_id' } })
+      .lean();
+
+    const filteredEmployees = salesEmployees.filter(e => {
+      const rName = e.user_id?.role_id?.name;
+      const isSales = rName === 'sales' || /sales|growth/i.test(e.designation || '');
+      if (req.user.role_name === 'sales' && req.employee) {
+        return (e._id.toString() === (req.employee._id || req.employee.id).toString());
+      }
+      return isSales;
+    });
+
+    const empPerformance = [];
+    for (const emp of filteredEmployees) {
+      const empLeads = await Lead.find({ assigned_sales_employee_id: emp._id }).lean();
+      const total_leads = empLeads.length;
+      const contacted_leads = empLeads.filter(l => l.status !== 'NEW').length;
+      const qualified_leads = empLeads.filter(l => ['QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON'].includes(l.status)).length;
+      const won_deals = empLeads.filter(l => l.status === 'WON').length;
+      const lost_deals = empLeads.filter(l => l.status === 'LOST').length;
+      const revenue_generated = empLeads.filter(l => l.status === 'WON').reduce((sum, l) => sum + (Number(l.deal_value) || 0), 0);
+      const total_val = empLeads.reduce((sum, l) => sum + (Number(l.deal_value) || 0), 0);
+      const avg_deal_value = total_leads > 0 ? Math.round(total_val / total_leads) : 0;
+      const conversion_rate = (won_deals + lost_deals) > 0
+        ? Math.round((won_deals / (won_deals + lost_deals)) * 100)
+        : (total_leads > 0 ? Math.round((won_deals / total_leads) * 100) : 0);
+
+      empPerformance.push({
+        employee_id: emp._id.toString(),
+        name: `${emp.first_name} ${emp.last_name || ''}`.trim(),
+        designation: emp.designation,
+        total_leads,
+        contacted_leads,
+        qualified_leads,
+        won_deals,
+        lost_deals,
+        revenue_generated,
+        avg_deal_value,
+        conversion_rate
+      });
+    }
+
+    res.json({
+      bounds,
+      kpis,
+      funnel: funnelData,
+      sources: sourceStats,
+      revenue: revenueAnalytics,
+      performance: empPerformance
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// =========================================================================
-// 3. Bulk Lead Import API (Section 5, 8)
-// =========================================================================
-router.post('/import-leads', authenticate, requireRole(['admin', 'sales']), (req, res) => {
-  const { leads } = req.body;
-  if (!Array.isArray(leads) || leads.length === 0) {
-    return res.status(400).json({ error: 'Please provide an array of leads to import.' });
+// 2. Kanban Sales Pipeline API
+router.get('/pipeline', authenticate, async (req, res) => {
+  try {
+    const { search, priority, source, employee_id } = req.query;
+    const filter = {};
+
+    if (req.user.role_name === 'sales' && req.employee) {
+      filter.$or = [
+        { assigned_sales_employee_id: req.employee._id || req.employee.id },
+        { created_by: req.user._id || req.user.id }
+      ];
+    } else if (employee_id && req.user.role_name === 'admin') {
+      filter.assigned_sales_employee_id = employee_id;
+    }
+
+    if (priority) filter.priority = priority;
+    if (source) filter.source = source;
+
+    if (search && search.trim()) {
+      const s = search.trim();
+      const regex = new RegExp(s, 'i');
+      filter.$or = [
+        { company_name: regex },
+        { contact_person: regex },
+        { phone: regex },
+        { lead_code: regex }
+      ];
+    }
+
+    const allLeadsRaw = await Lead.find(filter)
+      .populate('assigned_sales_employee_id', 'first_name last_name')
+      .sort({ deal_value: -1, _id: -1 })
+      .lean({ virtuals: true });
+
+    const allLeads = allLeadsRaw.map(l => {
+      const emp = l.assigned_sales_employee_id || {};
+      const pendingFu = (l.follow_ups || [])
+        .filter(fu => fu.status === 'PENDING')
+        .sort((a, b) => (a.follow_up_date || '').localeCompare(b.follow_up_date || ''))[0];
+      const acts = l.activities || [];
+      const lastAct = acts.length > 0 ? acts[acts.length - 1] : null;
+
+      return {
+        ...l,
+        id: l._id.toString(),
+        assigned_sales_employee_id: emp._id ? emp._id.toString() : (l.assigned_sales_employee_id || null),
+        assigned_employee_name: emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null,
+        next_follow_up: pendingFu ? `${pendingFu.follow_up_date} ${pendingFu.follow_up_time || ''}`.trim() : null,
+        last_activity: lastAct?.title || null,
+        last_activity_time: lastAct?.createdAt || lastAct?.created_at || null
+      };
+    });
+
+    const STAGES = ['NEW', 'CONTACTED', 'QUALIFIED', 'MEETING', 'PROPOSAL', 'NEGOTIATION', 'WON', 'LOST'];
+    const columns = {};
+
+    STAGES.forEach(stage => {
+      columns[stage] = {
+        stage,
+        count: 0,
+        total_value: 0,
+        leads: []
+      };
+    });
+
+    allLeads.forEach(lead => {
+      const st = columns[lead.status] ? lead.status : 'NEW';
+      columns[st].leads.push(lead);
+      columns[st].count += 1;
+      columns[st].total_value += Number(lead.deal_value || 0);
+    });
+
+    const total_pipeline_value = Object.values(columns).reduce((acc, col) => {
+      return col.stage !== 'WON' && col.stage !== 'LOST' ? acc + col.total_value : acc;
+    }, 0);
+
+    res.json({
+      stages: STAGES,
+      columns,
+      total_pipeline_value,
+      total_opportunities: allLeads.length
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
 
-  const salesEmployeeId = req.employee ? req.employee.id : null;
-  const importedIds = [];
+// 3. Bulk Lead Import API
+router.post('/import-leads', authenticate, requireRole(['admin', 'sales']), async (req, res) => {
+  try {
+    const { leads } = req.body;
+    if (!Array.isArray(leads) || leads.length === 0) {
+      return res.status(400).json({ error: 'Please provide an array of leads to import.' });
+    }
 
-  const importTx = db.transaction(() => {
+    const salesEmployeeId = req.employee ? (req.employee._id || req.employee.id) : null;
     const currentYear = new Date().getFullYear();
-    let counter = db.prepare('SELECT COUNT(*) as c FROM leads').get().c;
-
-    const stmt = db.prepare(`
-      INSERT INTO leads (
-        lead_code, lead_date, company_name, contact_person, designation, phone, whatsapp,
-        email, website, city, state, country, source, industry, deal_value, lead_score,
-        priority, status, urgency, requirement, assigned_sales_employee_id, created_by,
-        created_at, updated_at
-      ) VALUES (
-        ?, DATE('now'), ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, 'India', ?, ?, ?, ?,
-        ?, 'NEW', ?, ?, ?, ?,
-        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-    `);
+    let counter = await Lead.countDocuments();
+    const importedIds = [];
 
     for (const l of leads) {
       if (!l.company_name || !l.contact_person || !l.phone) continue;
       counter += 1;
       const code = `LEAD-${currentYear}-${String(counter).padStart(4, '0')}`;
 
-      const result = stmt.run(
-        code,
-        l.company_name,
-        l.contact_person,
-        l.designation || 'Owner',
-        l.phone,
-        l.whatsapp || l.phone,
-        l.email || '',
-        l.website || '',
-        l.city || '',
-        l.state || '',
-        l.source || 'Website',
-        l.industry || 'General Business',
-        Number(l.deal_value || 50000),
-        Number(l.lead_score || 50),
-        l.priority || 'MEDIUM',
-        l.urgency || 'Medium',
-        l.requirement || 'Lead generated via bulk import',
-        l.assigned_sales_employee_id || salesEmployeeId,
-        req.user.id
-      );
+      const newLead = await Lead.create({
+        lead_code: code,
+        lead_date: new Date().toISOString().split('T')[0],
+        company_name: l.company_name,
+        contact_person: l.contact_person,
+        designation: l.designation || 'Owner',
+        phone: l.phone,
+        whatsapp: l.whatsapp || l.phone,
+        email: l.email || '',
+        website: l.website || '',
+        city: l.city || '',
+        state: l.state || '',
+        country: 'India',
+        source: l.source || 'Website',
+        industry: l.industry || 'General Business',
+        deal_value: Number(l.deal_value || 50000),
+        lead_score: Number(l.lead_score || 50),
+        priority: l.priority || 'MEDIUM',
+        status: 'NEW',
+        urgency: l.urgency || 'Medium',
+        requirement: l.requirement || 'Lead generated via bulk import',
+        assigned_sales_employee_id: l.assigned_sales_employee_id || salesEmployeeId,
+        created_by: req.user._id || req.user.id
+      });
 
-      const leadId = result.lastInsertRowid;
-      importedIds.push(leadId);
+      importedIds.push(newLead._id);
 
-      logLeadActivity({
-        leadId,
+      await logLeadActivity({
+        leadId: newLead._id || newLead.id,
         activityType: 'LEAD_CREATED',
         title: 'Lead Imported',
         description: `Imported via bulk CSV/JSON upload by ${req.user.username}`,
         performedBy: salesEmployeeId
       });
     }
-  });
 
-  try {
-    importTx();
-    logAudit({
-      userId: req.user.id,
+    await logAudit({
+      userId: req.user._id || req.user.id,
       action: 'BULK_IMPORT',
       entity: 'leads',
       entityId: null,
@@ -596,70 +643,299 @@ router.post('/import-leads', authenticate, requireRole(['admin', 'sales']), (req
   }
 });
 
-// =========================================================================
-// 4. Client Handovers API (Section 16, 17)
-// =========================================================================
-router.get('/handovers', authenticate, (req, res) => {
-  const { status } = req.query;
-  let sql = `
-    SELECT ch.*,
-           l.company_name, l.contact_person, l.phone, l.email, l.lead_code,
-           c.client_code,
-           se.first_name || ' ' || se.last_name as sales_rep_name,
-           me.first_name || ' ' || me.last_name as marketing_manager_name,
-           ae.first_name || ' ' || ae.last_name as account_manager_name
-    FROM client_handovers ch
-    JOIN leads l ON ch.lead_id = l.id
-    JOIN clients c ON ch.client_id = c.id
-    LEFT JOIN employees se ON ch.sales_employee_id = se.id
-    LEFT JOIN employees me ON ch.marketing_manager_id = me.id
-    LEFT JOIN employees ae ON ch.account_manager_id = ae.id
-    WHERE 1=1
-  `;
-  const params = [];
+// 4. Client Handovers API
+router.get('/handovers', authenticate, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter = {};
 
-  if (status) {
-    sql += ' AND ch.status = ?';
-    params.push(status);
+    if (status) filter.status = status;
+    if (req.user.role_name === 'sales' && req.employee) {
+      filter.sales_employee_id = req.employee._id || req.employee.id;
+    }
+
+    const handoversRaw = await ClientHandover.find(filter)
+      .populate('lead_id', 'company_name contact_person phone email lead_code')
+      .populate('client_id', 'client_code')
+      .populate('sales_employee_id', 'first_name last_name')
+      .populate('marketing_manager_id', 'first_name last_name')
+      .populate('account_manager_id', 'first_name last_name')
+      .sort({ createdAt: -1 })
+      .lean({ virtuals: true });
+
+    const handovers = handoversRaw.map(ch => {
+      const l = ch.lead_id || {};
+      const c = ch.client_id || {};
+      const se = ch.sales_employee_id || {};
+      const me = ch.marketing_manager_id || {};
+      const ae = ch.account_manager_id || {};
+
+      return {
+        ...ch,
+        id: ch._id.toString(),
+        lead_id: l._id ? l._id.toString() : ch.lead_id,
+        company_name: l.company_name || null,
+        contact_person: l.contact_person || null,
+        phone: l.phone || null,
+        email: l.email || null,
+        lead_code: l.lead_code || null,
+        client_id: c._id ? c._id.toString() : ch.client_id,
+        client_code: c.client_code || null,
+        sales_rep_name: se.first_name ? `${se.first_name} ${se.last_name || ''}`.trim() : null,
+        marketing_manager_name: me.first_name ? `${me.first_name} ${me.last_name || ''}`.trim() : null,
+        account_manager_name: ae.first_name ? `${ae.first_name} ${ae.last_name || ''}`.trim() : null
+      };
+    });
+
+    res.json({ handovers });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  if (req.user.role_name === 'sales' && req.employee) {
-    sql += ' AND ch.sales_employee_id = ?';
-    params.push(req.employee.id);
-  }
-
-  sql += ' ORDER BY ch.id DESC';
-  const handovers = db.prepare(sql).all(...params);
-  res.json({ handovers });
 });
 
-router.put('/handovers/:id', authenticate, requireRole(['admin', 'marketing_manager']), (req, res) => {
-  const { status, special_instructions } = req.body;
-  const handover = db.prepare('SELECT * FROM client_handovers WHERE id = ?').get(req.params.id);
-  if (!handover) {
-    return res.status(404).json({ error: 'Handover record not found' });
+router.put('/handovers/:id', authenticate, requireRole(['admin', 'marketing_manager']), async (req, res) => {
+  try {
+    const { status, special_instructions } = req.body;
+    const handover = await ClientHandover.findById(req.params.id);
+    if (!handover) {
+      return res.status(404).json({ error: 'Handover record not found' });
+    }
+
+    const oldStatus = handover.status;
+    if (status) handover.status = status;
+    if (special_instructions !== undefined) handover.special_instructions = special_instructions;
+    await handover.save();
+
+    await logAudit({
+      userId: req.user._id || req.user.id,
+      action: 'HANDOVER_STATUS_UPDATED',
+      entity: 'client_handovers',
+      entityId: handover._id || handover.id,
+      oldValue: { status: oldStatus },
+      newValue: { status },
+      ip: req.ip
+    });
+
+    res.json({
+      message: 'Handover updated successfully',
+      handover: {
+        ...handover.toObject(),
+        id: handover._id.toString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
 
-  db.prepare(`
-    UPDATE client_handovers
-    SET status = coalesce(?, status),
-        special_instructions = coalesce(?, special_instructions),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(status, special_instructions, handover.id);
+// 5. Sales Executive Daily Tasks Management
+router.get('/tasks', authenticate, async (req, res) => {
+  try {
+    const { status, filter, lead_id, search } = req.query;
+    const today = new Date().toISOString().split('T')[0];
 
-  logAudit({
-    userId: req.user.id,
-    action: 'HANDOVER_STATUS_UPDATED',
-    entity: 'client_handovers',
-    entityId: handover.id,
-    oldValue: { status: handover.status },
-    newValue: { status },
-    ip: req.ip
-  });
+    const queryFilter = {};
 
-  const updated = db.prepare('SELECT * FROM client_handovers WHERE id = ?').get(handover.id);
-  res.json({ message: 'Handover updated successfully', handover: updated });
+    if (req.user.role_name === 'sales' && req.employee) {
+      queryFilter.assigned_employee_id = req.employee._id || req.employee.id;
+    }
+
+    if (status && status !== 'ALL') {
+      queryFilter.status = status;
+    }
+
+    if (lead_id) {
+      queryFilter.lead_id = lead_id;
+    }
+
+    if (filter === 'today') {
+      queryFilter.due_date = today;
+    } else if (filter === 'overdue') {
+      queryFilter.due_date = { $lt: today };
+      queryFilter.status = { $ne: 'COMPLETED' };
+    } else if (filter === 'upcoming') {
+      queryFilter.due_date = { $gt: today };
+    }
+
+    if (search && search.trim()) {
+      const regex = new RegExp(search.trim(), 'i');
+      queryFilter.$or = [
+        { task_title: regex },
+        { description: regex }
+      ];
+    }
+
+    const tasksRaw = await SalesTask.find(queryFilter)
+      .populate('lead_id', 'company_name contact_person lead_code')
+      .populate('assigned_employee_id', 'first_name last_name')
+      .sort({ due_date: 1, _id: -1 })
+      .lean({ virtuals: true });
+
+    const tasks = tasksRaw.map(st => {
+      const l = st.lead_id || {};
+      const emp = st.assigned_employee_id || {};
+      return {
+        ...st,
+        id: st._id.toString(),
+        lead_id: l._id ? l._id.toString() : st.lead_id,
+        lead_company_name: l.company_name || null,
+        lead_contact_person: l.contact_person || null,
+        lead_code: l.lead_code || null,
+        assigned_employee_id: emp._id ? emp._id.toString() : st.assigned_employee_id,
+        assigned_employee_name: emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null
+      };
+    });
+
+    const countFilter = {};
+    if (req.user.role_name === 'sales' && req.employee) {
+      countFilter.assigned_employee_id = req.employee._id || req.employee.id;
+    }
+
+    const total = await SalesTask.countDocuments(countFilter);
+    const pending = await SalesTask.countDocuments({ ...countFilter, status: { $ne: 'COMPLETED' } });
+    const completed = await SalesTask.countDocuments({ ...countFilter, status: 'COMPLETED' });
+    const todayDue = await SalesTask.countDocuments({ ...countFilter, due_date: today, status: { $ne: 'COMPLETED' } });
+    const overdue = await SalesTask.countDocuments({ ...countFilter, due_date: { $lt: today }, status: { $ne: 'COMPLETED' } });
+
+    res.json({
+      tasks,
+      counts: { total, pending, completed, todayDue, overdue }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create Sales Task
+router.post('/tasks', authenticate, async (req, res) => {
+  try {
+    const { task_title, description, due_date, priority, lead_id, assigned_employee_id } = req.body;
+
+    if (!task_title || !due_date) {
+      return res.status(400).json({ error: 'Task title and due date are required.' });
+    }
+
+    const assignedEmpId = assigned_employee_id || (req.employee ? (req.employee._id || req.employee.id) : null);
+
+    const task = await SalesTask.create({
+      task_title,
+      description: description || '',
+      due_date,
+      priority: priority || 'MEDIUM',
+      lead_id: lead_id || null,
+      assigned_employee_id: assignedEmpId,
+      status: 'TODO'
+    });
+
+    const populated = await SalesTask.findById(task._id)
+      .populate('lead_id', 'company_name contact_person')
+      .lean({ virtuals: true });
+
+    res.status(201).json({
+      message: 'Task created successfully',
+      task: {
+        ...populated,
+        id: populated._id.toString(),
+        lead_company_name: populated.lead_id?.company_name || null,
+        lead_contact_person: populated.lead_id?.contact_person || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update Sales Task Status / Details
+router.put('/tasks/:id', authenticate, async (req, res) => {
+  try {
+    const task = await SalesTask.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Sales task not found.' });
+    }
+
+    const { task_title, description, due_date, priority, status, lead_id } = req.body;
+
+    if (task_title !== undefined) task.task_title = task_title;
+    if (description !== undefined) task.description = description;
+    if (due_date !== undefined) task.due_date = due_date;
+    if (priority !== undefined) task.priority = priority;
+    if (status !== undefined) {
+      task.status = status;
+      if (status === 'COMPLETED' && !task.completed_at) {
+        task.completed_at = new Date();
+      }
+    }
+    if (lead_id !== undefined) task.lead_id = lead_id || null;
+
+    await task.save();
+
+    const populated = await SalesTask.findById(task._id)
+      .populate('lead_id', 'company_name contact_person')
+      .lean({ virtuals: true });
+
+    res.json({
+      message: 'Task updated successfully',
+      task: {
+        ...populated,
+        id: populated._id.toString(),
+        lead_company_name: populated.lead_id?.company_name || null,
+        lead_contact_person: populated.lead_id?.contact_person || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete Sales Task
+router.delete('/tasks/:id', authenticate, async (req, res) => {
+  try {
+    const task = await SalesTask.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found.' });
+    }
+
+    await SalesTask.findByIdAndDelete(task._id);
+    res.json({ message: 'Task deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get All Follow-ups (Alias for /sales/follow-ups)
+router.get('/follow-ups', authenticate, async (req, res) => {
+  try {
+    const leads = await Lead.find({})
+      .populate('follow_ups.assigned_employee_id', 'first_name last_name')
+      .lean({ virtuals: true });
+
+    const followUps = [];
+    for (const l of leads) {
+      for (const fu of (l.follow_ups || [])) {
+        const emp = fu.assigned_employee_id || {};
+        followUps.push({
+          ...fu,
+          id: fu._id.toString(),
+          lead_id: l._id.toString(),
+          company_name: l.company_name,
+          contact_person: l.contact_person,
+          phone: l.phone,
+          deal_value: l.deal_value,
+          assigned_employee_name: emp.first_name ? `${emp.first_name} ${emp.last_name || ''}`.trim() : null
+        });
+      }
+    }
+
+    followUps.sort((a, b) => {
+      const dateCompare = (b.follow_up_date || '').localeCompare(a.follow_up_date || '');
+      if (dateCompare !== 0) return dateCompare;
+      return (b.follow_up_time || '').localeCompare(a.follow_up_time || '');
+    });
+
+    res.json({ followUps });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch follow-ups: ' + err.message });
+  }
 });
 
 export default router;

@@ -1,212 +1,265 @@
 import express from 'express';
-import db, { logAudit, createNotification } from '../db/database.js';
+import mongoose from 'mongoose';
+import { Chat, ChatMessage, Client, Project, ClientRequest, User, Role, Employee } from '../models/index.js';
+import { logAudit } from '../db/helpers.js';
 import { authenticate } from '../middleware/auth.js';
-import { sendToUser, broadcast } from '../websocket.js';
+import { sendToUser } from '../websocket.js';
 
 const router = express.Router();
 
-// List My Chats (Respecting Dual Boundary: Internal vs Client)
-router.get('/', authenticate, (req, res) => {
-  let sql = `
-    SELECT c.*,
-           cm.last_read_at,
-           cl.company_name as client_name,
-           p.project_name,
-           cr.request_code,
-           (SELECT message FROM chat_messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message,
-           (SELECT created_at FROM chat_messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message_at,
-           (SELECT COUNT(*) FROM chat_messages WHERE chat_id = c.id AND (cm.last_read_at IS NULL OR created_at > cm.last_read_at)) as unread_count
-    FROM chats c
-    JOIN chat_members cm ON c.id = cm.chat_id AND cm.user_id = ?
-    LEFT JOIN clients cl ON c.client_id = cl.id
-    LEFT JOIN projects p ON c.project_id = p.id
-    LEFT JOIN client_requests cr ON c.request_id = cr.id
-    WHERE 1=1
-  `;
-  const params = [req.user.id];
+// List My Chats
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const query = {
+      'members.user_id': req.user._id
+    };
 
-  // Client user can ONLY see CLIENT_COMMUNICATION chats
-  if (req.user.user_type === 'client') {
-    sql += ` AND c.chat_type = 'CLIENT_COMMUNICATION'`;
+    if (req.user.user_type === 'client') {
+      query.chat_type = 'CLIENT_COMMUNICATION';
+    }
+
+    const chats = await Chat.find(query)
+      .populate('client_id')
+      .populate('project_id')
+      .sort({ updated_at: -1 });
+
+    const chatIds = chats.map(c => c._id);
+    const lastMessages = await ChatMessage.aggregate([
+      { $match: { chat_id: { $in: chatIds } } },
+      { $sort: { created_at: -1 } },
+      {
+        $group: {
+          _id: '$chat_id',
+          last_message: { $first: '$message' },
+          last_message_at: { $first: '$created_at' }
+        }
+      }
+    ]);
+
+    const msgMap = new Map(lastMessages.map(m => [m._id.toString(), m]));
+
+    const formatted = chats.map(c => {
+      const cid = c._id.toString();
+      const msgInfo = msgMap.get(cid);
+      const member = (c.members || []).find(m => m.user_id?.toString() === req.user.id);
+
+      return {
+        ...c.toJSON(),
+        client_name: c.client_id?.company_name || '',
+        project_name: c.project_id?.project_name || '',
+        last_message: msgInfo?.last_message || '',
+        last_message_at: msgInfo?.last_message_at || c.updated_at,
+        unread_count: 0
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error listing chats:', err);
+    res.status(500).json({ error: 'Failed to retrieve chats.' });
   }
-
-  sql += ` ORDER BY last_message_at DESC, c.id DESC`;
-  const chats = db.prepare(sql).all(...params);
-  res.json(chats);
 });
 
 // Messages in a Chat
-router.get('/:id/messages', authenticate, (req, res) => {
-  const chatId = req.params.id;
+router.get('/:id/messages', authenticate, async (req, res) => {
+  try {
+    const chatId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
 
-  // Verify membership
-  const member = db.prepare('SELECT * FROM chat_members WHERE chat_id = ? AND user_id = ?').get(chatId, req.user.id);
-  if (!member && req.user.role_name !== 'admin') {
-    return res.status(403).json({ error: 'Access denied: You are not a participant in this conversation.' });
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    const isMember = (chat.members || []).some(m => m.user_id?.toString() === req.user.id);
+    if (!isMember && req.user.role_name !== 'admin') {
+      return res.status(403).json({ error: 'Access denied: You are not a participant in this conversation.' });
+    }
+
+    const messages = await ChatMessage.find({ chat_id: chat._id })
+      .populate({
+        path: 'sender_user_id',
+        populate: { path: 'role_id' }
+      })
+      .sort({ created_at: 1 });
+
+    const userIds = messages.map(m => m.sender_user_id?._id).filter(Boolean);
+    const employees = await Employee.find({ user_id: { $in: userIds } });
+    const empMap = new Map(employees.map(e => [e.user_id.toString(), e]));
+
+    const formatted = messages.map(m => {
+      const u = m.sender_user_id;
+      const r = u?.role_id;
+      const emp = u ? empMap.get(u._id.toString()) : null;
+
+      return {
+        ...m.toJSON(),
+        sender_username: u?.username || '',
+        sender_type: u?.user_type || '',
+        sender_role: r?.name || '',
+        sender_full_name: emp ? `${emp.first_name} ${emp.last_name}` : u?.username || ''
+      };
+    });
+
+    // Update last_read_at
+    await Chat.updateOne(
+      { _id: chat._id, 'members.user_id': req.user._id },
+      { $set: { 'members.$.last_read_at': new Date() } }
+    );
+
+    res.json(formatted);
+  } catch (err) {
+    console.error('Error fetching chat messages:', err);
+    res.status(500).json({ error: 'Failed to retrieve messages.' });
   }
-
-  const messages = db.prepare(`
-    SELECT m.*, u.username as sender_username, u.user_type as sender_type,
-           r.name as sender_role,
-           e.first_name || ' ' || e.last_name as sender_full_name,
-           cr.request_code as converted_request_code
-    FROM chat_messages m
-    JOIN users u ON m.sender_user_id = u.id
-    JOIN roles r ON u.role_id = r.id
-    LEFT JOIN employees e ON e.user_id = u.id
-    LEFT JOIN client_requests cr ON m.converted_request_id = cr.id
-    WHERE m.chat_id = ?
-    ORDER BY m.id ASC
-  `).all(chatId);
-
-  // Update last_read_at
-  db.prepare('UPDATE chat_members SET last_read_at = CURRENT_TIMESTAMP WHERE chat_id = ? AND user_id = ?').run(chatId, req.user.id);
-
-  res.json(messages);
 });
 
 // Send Message
-router.post('/:id/messages', authenticate, (req, res) => {
-  const chatId = req.params.id;
-  const { message, attachment_url, reply_to_id } = req.body;
+router.post('/:id/messages', authenticate, async (req, res) => {
+  try {
+    const chatId = req.params.id;
+    const { message, attachment_url } = req.body;
 
-  if (!message && !attachment_url) {
-    return res.status(400).json({ error: 'Message content or attachment is required.' });
-  }
-
-  const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
-  if (!chat) {
-    return res.status(404).json({ error: 'Chat not found' });
-  }
-
-  // Client safety check: client can NEVER post into internal chat
-  if (req.user.user_type === 'client' && chat.chat_type !== 'CLIENT_COMMUNICATION') {
-    return res.status(403).json({ error: 'Access denied: Internal chat is strictly confidential.' });
-  }
-
-  // Insert message
-  const result = db.prepare(`
-    INSERT INTO chat_messages (chat_id, sender_user_id, message, attachment_url, reply_to_id)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(chatId, req.user.id, message || '', attachment_url || null, reply_to_id || null);
-
-  const messageId = result.lastInsertRowid;
-
-  // Notify chat members via WebSocket
-  const members = db.prepare('SELECT user_id FROM chat_members WHERE chat_id = ? AND user_id != ?').all(chatId, req.user.id);
-  for (const m of members) {
-    sendToUser(m.user_id, {
-      type: 'NEW_CHAT_MESSAGE',
-      chatId,
-      messageId,
-      sender: req.user.username,
-      content: message
-    });
-  }
-
-  const createdMessage = db.prepare(`
-    SELECT m.*, u.username as sender_username, u.user_type as sender_type,
-           r.name as sender_role,
-           e.first_name || ' ' || e.last_name as sender_full_name
-    FROM chat_messages m
-    JOIN users u ON m.sender_user_id = u.id
-    JOIN roles r ON u.role_id = r.id
-    LEFT JOIN employees e ON e.user_id = u.id
-    WHERE m.id = ?
-  `).get(messageId);
-
-  res.status(201).json(createdMessage);
-});
-
-// Convert Chat Message to Structured Client Request (Section 31 & 51)
-router.post('/messages/:messageId/convert-to-request', authenticate, (req, res) => {
-  const messageId = req.params.messageId;
-  const { category, priority, due_date } = req.body;
-
-  const msg = db.prepare(`
-    SELECT m.*, c.client_id, c.project_id
-    FROM chat_messages m
-    JOIN chats c ON m.chat_id = c.id
-    WHERE m.id = ?
-  `).get(messageId);
-
-  if (!msg) {
-    return res.status(404).json({ error: 'Message not found' });
-  }
-
-  if (msg.is_converted_to_request) {
-    return res.status(400).json({ error: 'This message has already been converted to a request.' });
-  }
-
-  const clientId = msg.client_id || (req.client ? req.client.id : 1);
-  const count = db.prepare('SELECT COUNT(*) as count FROM client_requests').get().count + 1;
-  const request_code = `REQ-${new Date().getFullYear()}-${String(count).padStart(5, '0')}`;
-  const request_title = msg.message.slice(0, 60) || 'Client Chat Request';
-
-  const convertTransaction = db.transaction(() => {
-    // 1. Create client request
-    const reqRes = db.prepare(`
-      INSERT INTO client_requests (
-        request_code, client_id, project_id, request_title, category, description,
-        requested_date, due_date, priority, status, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, DATE('now'), ?, ?, 'NEW', ?)
-    `).run(
-      request_code, clientId, msg.project_id || null, request_title,
-      category || 'Social Media', msg.message, due_date || null, priority || 'MEDIUM', req.user.id
-    );
-
-    const requestId = reqRes.lastInsertRowid;
-
-    // 2. Mark message as converted
-    db.prepare(`
-      UPDATE chat_messages SET
-        is_converted_to_request = 1,
-        converted_request_id = ?
-      WHERE id = ?
-    `).run(requestId, messageId);
-
-    return requestId;
-  });
-
-  const requestId = convertTransaction();
-
-  logAudit({
-    userId: req.user.id,
-    action: 'CONVERTED_FROM_CHAT',
-    entity: 'client_requests',
-    entityId: requestId,
-    newValue: { request_code, message_id: messageId },
-    ip: req.ip
-  });
-
-  const createdReq = db.prepare('SELECT * FROM client_requests WHERE id = ?').get(requestId);
-  res.status(201).json({ message: `Converted to request ${request_code}!`, request: createdReq });
-});
-
-// Create New Chat (1-on-1 or Team channel)
-router.post('/', authenticate, (req, res) => {
-  const { chat_type, name, client_id, project_id, member_user_ids } = req.body;
-
-  const result = db.prepare(`
-    INSERT INTO chats (chat_type, name, client_id, project_id)
-    VALUES (?, ?, ?, ?)
-  `).run(chat_type || 'INTERNAL_GROUP', name || 'New Chat', client_id || null, project_id || null);
-
-  const chatId = result.lastInsertRowid;
-
-  // Add creator
-  db.prepare('INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES (?, ?)').run(chatId, req.user.id);
-
-  // Add other members
-  if (member_user_ids && Array.isArray(member_user_ids)) {
-    const insertMember = db.prepare('INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES (?, ?)');
-    for (const uid of member_user_ids) {
-      insertMember.run(chatId, uid);
+    if (!message && !attachment_url) {
+      return res.status(400).json({ error: 'Message content or attachment is required.' });
     }
-  }
 
-  const created = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
-  res.status(201).json({ message: 'Chat created successfully', chat: created });
+    if (!mongoose.Types.ObjectId.isValid(chatId)) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    if (req.user.user_type === 'client' && chat.chat_type !== 'CLIENT_COMMUNICATION') {
+      return res.status(403).json({ error: 'Access denied: Internal chat is strictly confidential.' });
+    }
+
+    const newMsg = await ChatMessage.create({
+      chat_id: chat._id,
+      sender_user_id: req.user._id,
+      message: message || '',
+      attachment_url: attachment_url || null
+    });
+
+    // Notify other members via WebSocket
+    for (const m of chat.members || []) {
+      if (m.user_id?.toString() !== req.user.id) {
+        sendToUser(m.user_id.toString(), {
+          type: 'NEW_CHAT_MESSAGE',
+          chatId,
+          messageId: newMsg._id.toString(),
+          sender: req.user.username,
+          content: message
+        });
+      }
+    }
+
+    const createdMessage = {
+      ...newMsg.toJSON(),
+      sender_username: req.user.username,
+      sender_type: req.user.user_type,
+      sender_role: req.user.role_name,
+      sender_full_name: req.employee ? `${req.employee.first_name} ${req.employee.last_name}` : req.user.username
+    };
+
+    res.status(201).json(createdMessage);
+  } catch (err) {
+    console.error('Error sending chat message:', err);
+    res.status(500).json({ error: 'Failed to send message.' });
+  }
+});
+
+// Convert Chat Message to Structured Client Request
+router.post('/messages/:messageId/convert-to-request', authenticate, async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { category, priority, due_date } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    const msg = await ChatMessage.findById(messageId);
+    if (!msg) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    if (msg.converted_request_id) {
+      return res.status(400).json({ error: 'This message has already been converted to a request.' });
+    }
+
+    const chat = await Chat.findById(msg.chat_id);
+    const clientId = chat?.client_id || (req.client ? req.client._id : null);
+
+    const count = await ClientRequest.countDocuments() + 1;
+    const request_code = `REQ-${new Date().getFullYear()}-${String(count).padStart(5, '0')}`;
+    const request_title = msg.message.slice(0, 60) || 'Client Chat Request';
+
+    const newReq = await ClientRequest.create({
+      request_code,
+      client_id: clientId,
+      project_id: chat?.project_id || null,
+      title: request_title,
+      request_type: category || 'Social Media',
+      description: msg.message,
+      priority: priority || 'MEDIUM',
+      status: 'SUBMITTED',
+      due_date: due_date ? new Date(due_date) : null
+    });
+
+    msg.converted_request_id = newReq._id;
+    await msg.save();
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'CONVERTED_FROM_CHAT',
+      entity: 'client_requests',
+      entityId: newReq._id,
+      newValue: { request_code, message_id: messageId },
+      ip: req.ip
+    });
+
+    res.status(201).json({ message: `Converted to request ${request_code}!`, request: newReq.toJSON() });
+  } catch (err) {
+    console.error('Error converting message to request:', err);
+    res.status(500).json({ error: 'Failed to convert message.' });
+  }
+});
+
+// Create New Chat
+router.post('/', authenticate, async (req, res) => {
+  try {
+    const { chat_type, name, client_id, project_id, member_user_ids } = req.body;
+
+    const members = [{ user_id: req.user._id, role: 'ADMIN' }];
+
+    if (member_user_ids && Array.isArray(member_user_ids)) {
+      for (const uid of member_user_ids) {
+        if (mongoose.Types.ObjectId.isValid(uid) && uid.toString() !== req.user.id) {
+          members.push({ user_id: uid, role: 'MEMBER' });
+        }
+      }
+    }
+
+    const newChat = await Chat.create({
+      chat_type: chat_type || 'DIRECT',
+      name: name || 'New Chat',
+      client_id: client_id && mongoose.Types.ObjectId.isValid(client_id) ? client_id : null,
+      project_id: project_id && mongoose.Types.ObjectId.isValid(project_id) ? project_id : null,
+      created_by: req.user._id,
+      members
+    });
+
+    res.status(201).json({ message: 'Chat created successfully', chat: newChat.toJSON() });
+  } catch (err) {
+    console.error('Error creating chat:', err);
+    res.status(500).json({ error: 'Failed to create chat.' });
+  }
 });
 
 export default router;

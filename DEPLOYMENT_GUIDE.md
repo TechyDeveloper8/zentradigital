@@ -17,10 +17,11 @@ zentra/
 │   ├── .env.example              # Frontend environment variables template
 │   └── README.md                 # Frontend-specific documentation
 │
-├── backend/                      # Node.js + Express + SQLite + WebSocket Server
-│   ├── db/                       # Database schema, seed data, and connection
+├── backend/                      # Node.js + Express + MongoDB (Mongoose) + WebSocket Server
+│   ├── db/                       # MongoDB connection, helpers, and migration scripts
+│   ├── models/                   # Mongoose schemas (Organization, User, Client, Task, etc.)
 │   ├── middleware/               # Authentication & role guard middleware
-│   ├── routes/                   # REST API routes (CRM, ERP, Sales, Billing, etc.)
+│   ├── routes/                   # REST API routes (CRM, ERP, Sales, Billing, Media, etc.)
 │   ├── uploads/                  # Upload directory for project files & assets
 │   ├── server.js                 # Express server & API routes
 │   ├── websocket.js              # Real-time WebSocket server
@@ -63,19 +64,21 @@ npm run dev
 
 #### Part A: Deploy Backend to Render (or Railway / DigitalOcean App Platform)
 1. Push your repository to GitHub or GitLab.
-2. Sign in to [Render](https://render.com) (or Railway).
-3. Click **New +** → **Web Service**.
-4. Connect your repository.
-5. Configure settings:
+2. Set up a free cluster on [MongoDB Atlas](https://www.mongodb.com/atlas) (or use your own MongoDB instance).
+3. Sign in to [Render](https://render.com) (or Railway).
+4. Click **New +** → **Web Service**.
+5. Connect your repository.
+6. Configure settings:
    - **Root Directory**: `backend`
    - **Environment**: `Node`
    - **Build Command**: `npm install`
    - **Start Command**: `npm start`
-6. Add Environment Variables:
+7. Add Environment Variables:
    - `PORT`: `5000` (or leave default assigned by Render)
    - `JWT_SECRET`: A secure random string (e.g. `your-random-production-jwt-key`)
-7. Click **Deploy**.
-8. Copy your live backend URL (e.g., `https://zentra-backend.onrender.com`).
+   - `MONGODB_URI`: Your MongoDB connection URI (e.g. `mongodb+srv://<user>:<password>@cluster0.mongodb.net/zentra_digital?retryWrites=true&w=majority`)
+8. Click **Deploy**.
+9. Copy your live backend URL (e.g., `https://zentra-backend.onrender.com`).
 
 #### Part B: Deploy Frontend to Vercel (or Netlify / Cloudflare Pages)
 1. Sign in to [Vercel](https://vercel.com) (or Netlify).

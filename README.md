@@ -9,7 +9,7 @@ Modern, agency website and internal business operating system organized in clean
 ```
 zentra/
 ├── frontend/        # React 19 + Vite Single Page Application (Marketing & Portals)
-├── backend/         # Express + SQLite + WebSocket REST & Realtime API Server
+├── backend/         # Express + MongoDB (Mongoose) + WebSocket REST & Realtime API Server
 ├── package.json     # Root orchestrator with simultaneous dev & build scripts
 ├── DEPLOYMENT_GUIDE.md # Complete hosting instructions (Vercel, Netlify, Render, cPanel, VPS)
 └── README.md        # This file
