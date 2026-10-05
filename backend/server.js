@@ -3,6 +3,7 @@ import express from 'express';
 import http from 'http';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 // Initialize MongoDB Database connection
@@ -92,6 +93,21 @@ app.use('/api/media', mediaRouter);
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString(), platform: 'Zentra Digital Agency ERP', db: 'mongodb' });
 });
+
+// Serve Frontend static production assets if dist exists
+const rootDistPath = path.join(__dirname, '../dist');
+const frontendDistPath = path.join(__dirname, '../frontend/dist');
+const resolvedDist = fs.existsSync(rootDistPath) ? rootDistPath : (fs.existsSync(frontendDistPath) ? frontendDistPath : null);
+
+if (resolvedDist) {
+  app.use(express.static(resolvedDist));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/ws')) {
+      return next();
+    }
+    res.sendFile(path.join(resolvedDist, 'index.html'));
+  });
+}
 
 // Centralized Error Handling
 app.use((err, req, res, next) => {
