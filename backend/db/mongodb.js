@@ -30,13 +30,15 @@ export const baseSchemaOptions = {
 
 let isConnected = false;
 
-export async function connectDB() {
-  if (isConnected) return mongoose.connection;
+export async function connectDB(customUri) {
+  if (isConnected && mongoose.connection.readyState === 1) return mongoose.connection;
+
+  const uri = customUri || process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/zentra_digital';
 
   try {
-    const conn = await mongoose.connect(MONGODB_URI, {
+    const conn = await mongoose.connect(uri, {
       maxPoolSize: 20,
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
     });
     isConnected = true;
@@ -47,6 +49,7 @@ export async function connectDB() {
     throw error;
   }
 }
+
 
 mongoose.connection.on('disconnected', () => {
   isConnected = false;
